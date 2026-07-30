@@ -1,0 +1,9 @@
+{
+  "name": "humble-to-steamgifts",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Privé Chrome-extensie die van Humble Choice-keys SteamGifts-giveaways maakt.",
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  }
+}

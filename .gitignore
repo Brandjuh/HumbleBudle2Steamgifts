@@ -1,0 +1,10 @@
+node_modules/
+*.log
+
+# Nooit committen: de private sleutel van een gepackte extensie en alles wat
+# er als export van keys uit zou kunnen rollen.
+*.pem
+*.crx
+*.zip
+keys.txt
+keys.csv

@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="nl">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Humble → SteamGifts</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Humble → SteamGifts</h1>
+      <p class="topbar__summary" data-role="summary">Laden…</p>
+    </header>
+
+    <nav class="tabs" data-role="tabs">
+      <button type="button" class="tab is-active" data-tab="queue">Wachtrij</button>
+      <button type="button" class="tab" data-tab="humble">Humble</button>
+      <button type="button" class="tab" data-tab="settings">Instellingen</button>
+      <button type="button" class="tab" data-tab="diagnose">Diagnose</button>
+    </nav>
+
+    <p class="notice" data-role="notice" hidden></p>
+
+    <!-- Wachtrij -->
+    <section class="panel is-active" data-panel="queue">
+      <div class="actions">
+        <button type="button" class="btn btn--primary" data-action="start">Start</button>
+        <button type="button" class="btn" data-action="pause">Pauze</button>
+        <button type="button" class="btn btn--danger" data-action="clear-queue">Leegmaken</button>
+      </div>
+      <ol class="queue" data-role="queue"></ol>
+      <p class="empty" data-role="queue-empty">
+        Nog niets in de wachtrij. Ga naar het tabblad <strong>Humble</strong> of vink
+        spellen aan op je Humble Choice-maandpagina.
+      </p>
+    </section>
+
+    <!-- Humble -->
+    <section class="panel" data-panel="humble">
+      <div class="actions">
+        <button type="button" class="btn" data-action="scan">Opnieuw scannen</button>
+        <button type="button" class="btn" data-action="select-all">Alles</button>
+        <button type="button" class="btn" data-action="select-none">Niets</button>
+      </div>
+      <p class="hint" data-role="catalog-hint"></p>
+      <ul class="catalog" data-role="catalog"></ul>
+      <div class="actions actions--sticky">
+        <button type="button" class="btn btn--primary" data-action="add-selected" disabled>
+          Voeg toe aan wachtrij
+        </button>
+      </div>
+      <p class="hint hint--muted">
+        Toevoegen onthult de keys bij Humble. De key blijft bruikbaar zolang niemand
+        hem inwisselt, maar je kunt er daarna geen Humble-gift-link meer van maken.
+      </p>
+    </section>
+
+    <!-- Instellingen -->
+    <section class="panel" data-panel="settings">
+      <form data-role="settings">
+        <fieldset>
+          <legend>Looptijd</legend>
+          <label>
+            Start over (minuten)
+            <input type="number" name="startOffsetMinutes" min="1" max="1440" step="1" />
+          </label>
+          <label>
+            Looptijd (dagen)
+            <input type="number" name="durationDays" min="1" max="60" step="1" />
+          </label>
+          <p class="hint" data-role="schedule-preview"></p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Wie mag meedoen</legend>
+          <label>
+            Toegang
+            <select name="whoCanEnter">
+              <option value="everyone">Iedereen</option>
+              <option value="invite_only">Alleen op uitnodiging</option>
+              <option value="groups">Groepen / whitelist</option>
+            </select>
+          </label>
+          <label class="checkbox">
+            <input type="checkbox" name="whitelist" />
+            Mijn whitelist meenemen (alleen bij groepen)
+          </label>
+          <label>
+            Groep-id's (spatiegescheiden)
+            <input type="text" name="groupIds" placeholder="bijv. 1a2b3c 4d5e6f" />
+          </label>
+          <label>
+            Minimum contributor level
+            <input type="number" name="contributorLevel" min="0" max="10" step="1" />
+          </label>
+          <p class="hint">
+            De id's van groepen en landen vind je via <strong>Diagnose → SteamGifts</strong>.
+          </p>
+        </fieldset>
+
+        <fieldset>
+          <legend>Regio</legend>
+          <label class="checkbox">
+            <input type="checkbox" name="regionRestricted" />
+            Regio-restrictie inschakelen
+          </label>
+          <label>
+            Landcodes (spatiegescheiden)
+            <input type="text" name="countryIds" placeholder="bijv. NL BE DE" />
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Overig</legend>
+          <label>
+            Aantal kopieën
+            <input type="number" name="copies" min="1" max="100" step="1" />
+          </label>
+          <label>
+            Beschrijving (optioneel)
+            <textarea name="description" rows="3"></textarea>
+          </label>
+        </fieldset>
+
+        <fieldset>
+          <legend>Verzenden</legend>
+          <label class="checkbox">
+            <input type="checkbox" name="autoSubmit" />
+            Automatisch verzenden
+          </label>
+          <p class="hint hint--warn">
+            Uit betekent: de extensie vult alles in en jij drukt op verzenden. Aan
+            betekent dat de extensie zelf op de knop drukt na een aftelling — je kunt
+            elke aftelling nog annuleren.
+          </p>
+          <label>
+            Aftellen voor verzenden (seconden)
+            <input type="number" name="autoSubmitDelaySeconds" min="3" max="120" step="1" />
+          </label>
+        </fieldset>
+      </form>
+    </section>
+
+    <!-- Diagnose -->
+    <section class="panel" data-panel="diagnose">
+      <p class="hint">
+        Controleert of de extensie de velden op beide sites nog herkent. Leest alleen;
+        verandert niets en onthult geen keys.
+      </p>
+      <div class="actions">
+        <button type="button" class="btn" data-action="diagnose-humble">Humble</button>
+        <button type="button" class="btn" data-action="diagnose-steamgifts">SteamGifts</button>
+      </div>
+      <div data-role="diagnostics"></div>
+      <div class="actions">
+        <button type="button" class="btn btn--danger" data-action="clear-keys">
+          Wis opgeslagen keys
+        </button>
+      </div>
+    </section>
+
+    <script src="../lib/shared.js"></script>
+    <script src="../lib/format.js"></script>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>

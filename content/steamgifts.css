@@ -1,0 +1,56 @@
+/* Statusbalk die de extensie op steamgifts.com toont. */
+
+.hsg-sg-banner {
+  position: fixed;
+  right: 16px;
+  bottom: 16px;
+  z-index: 2147483000;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 360px;
+  box-sizing: border-box;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border-left: 4px solid #6b7689;
+  background: #14161c;
+  color: #f2f4f8;
+  font: 400 13px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+}
+
+.hsg-sg-banner strong {
+  font-weight: 700;
+}
+
+.hsg-sg-banner span {
+  color: #b6becd;
+}
+
+.hsg-sg-banner[data-tone='ok'] {
+  border-left-color: #3fae66;
+}
+
+.hsg-sg-banner[data-tone='warn'] {
+  border-left-color: #d99a2b;
+}
+
+.hsg-sg-banner[data-tone='error'] {
+  border-left-color: #d4574f;
+}
+
+.hsg-sg-banner__btn {
+  align-self: flex-start;
+  margin-top: 2px;
+  padding: 5px 10px;
+  border-radius: 6px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.hsg-sg-banner__btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
