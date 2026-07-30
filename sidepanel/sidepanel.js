@@ -17,6 +17,7 @@
     queueEmpty: document.querySelector('[data-role="queue-empty"]'),
     catalog: document.querySelector('[data-role="catalog"]'),
     catalogHint: document.querySelector('[data-role="catalog-hint"]'),
+    catalogFilter: document.querySelector('[data-role="catalog-filter"]'),
     settingsForm: document.querySelector('[data-role="settings"]'),
     schedulePreview: document.querySelector('[data-role="schedule-preview"]'),
     diagnostics: document.querySelector('[data-role="diagnostics"]'),
@@ -27,6 +28,16 @@
 
   const splitIds = (value) => String(value || '').trim().split(/\s+/).filter(Boolean);
   const clamp = (value, min, max) => Math.min(max, Math.max(min, value));
+
+  /** Volledige URL's maken de smalle kolom onleesbaar. */
+  const shortUrl = (value) => {
+    try {
+      const url = new URL(value);
+      return url.pathname + (url.search.length > 24 ? '?…' : url.search);
+    } catch (error) {
+      return value;
+    }
+  };
 
   const STATUS_LABEL = {
     [STATUS.PENDING]: 'wacht',
@@ -183,7 +194,7 @@
 
     if (!catalog || !catalog.games || catalog.games.length === 0) {
       ui.catalogHint.textContent =
-        'Nog geen catalogus. Open je Humble Choice-maandpagina en klik op "Opnieuw scannen".';
+        'Nog geen catalogus. Open je Humble keys-pagina (/home/keys of de downloadpagina van de bundel) en klik op "Deze pagina scannen".';
       updateAddButton();
       return;
     }
@@ -196,15 +207,29 @@
         .filter((item) => item.status !== STATUS.ERROR)
         .map((item) => item.id)
     );
-    const hints = [`${catalog.games.length} bruikbare Steam-keys gevonden.`];
-    if (catalog.monthGameCount != null && catalog.monthGameCount > catalog.games.length) {
-      hints.push(
-        `De maandpagina toont ${catalog.monthGameCount} spellen — de rest heb je waarschijnlijk nog niet geclaimd.`
-      );
+    const hints = [`${catalog.games.length} spellen gevonden.`];
+    if (catalog.pageUrl) hints.push(`Van: ${shortUrl(catalog.pageUrl)}.`);
+    if (catalog.source === 'dom') {
+      hints.push('Zonder Steam-appid — er wordt op titel gezocht op SteamGifts.');
     }
+    if (catalog.apiError) hints.push(`API-aanvulling mislukt: ${catalog.apiError}`);
     ui.catalogHint.textContent = hints.join(' ');
 
-    for (const game of catalog.games) {
+    const needle = HSG.normalizeTitle(ui.catalogFilter.value || '');
+    const visible = needle
+      ? catalog.games.filter((game) =>
+          HSG.normalizeTitle(game.humanName).includes(needle)
+        )
+      : catalog.games;
+
+    if (visible.length === 0) {
+      const li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'Niets gevonden met deze zoekterm.';
+      ui.catalog.append(li);
+    }
+
+    for (const game of visible) {
       const li = document.createElement('li');
       li.className = 'catalog__item';
 
@@ -228,6 +253,7 @@
       if (queued.has(game.id)) tags.push('staat al in de wachtrij');
       if (game.revealed) tags.push('key al onthuld');
       if (!game.steamAppId) tags.push('geen appid — zoekt op titel');
+      if (game.keyType && game.keyType !== 'steam') tags.push(`platform: ${game.keyType}`);
       if (tags.length) {
         tag.textContent = tags.join(' · ');
         label.append(document.createElement('br'), tag);
@@ -280,9 +306,17 @@
 
     for (const [site, report] of Object.entries(diagnostics)) {
       const heading = document.createElement('h2');
-      heading.textContent =
-        site === 'humble' ? 'Humble Bundle' : 'SteamGifts';
+      heading.textContent = site === 'humble' ? 'Humble Bundle' : 'SteamGifts';
       ui.diagnostics.append(heading);
+
+      // Welke tab er gecontroleerd is, is geen detail: er kunnen meerdere tabs
+      // van dezelfde site open staan en dan diagnosticeer je zomaar de verkeerde.
+      if (report.url) {
+        const where = document.createElement('p');
+        where.className = 'hint';
+        where.textContent = `Gedraaid op: ${report.url}`;
+        ui.diagnostics.append(where);
+      }
 
       if (report.error) {
         const error = document.createElement('p');
@@ -337,7 +371,12 @@
     },
     scan: async () => {
       showNotice('Scannen…', 'ok');
-      await call({ type: MSG.HUMBLE_SCAN_REQUEST });
+      await call({ type: MSG.HUMBLE_SCAN_REQUEST, scope: 'page' });
+      showNotice('');
+    },
+    'scan-library': async () => {
+      showNotice('Hele bibliotheek ophalen — dit kan even duren…', 'ok');
+      await call({ type: MSG.HUMBLE_SCAN_REQUEST, scope: 'library' });
       showNotice('');
     },
     'select-all': () => {
@@ -408,6 +447,9 @@
       await refresh();
     })
   );
+
+  // Filteren gebeurt lokaal; niet elke toetsaanslag hoeft langs de service worker.
+  ui.catalogFilter.addEventListener('input', () => renderCatalog());
 
   // De service worker kan zonder ons de wachtrij bijwerken (bijv. wanneer een
   // giveaway is aangemaakt), dus meeluisteren op storage in plaats van pollen.

@@ -4,10 +4,11 @@ Beide sites vereisen een ingelogde sessie, dus de integratie is niet
 automatiseerbaar. Dit protocol loopt van "verandert niets" naar "maakt echt een
 giveaway aan", zodat je fouten tegenkomt vóórdat ze onomkeerbaar zijn.
 
-De selectors in `lib/selectors.js` zijn afgeleid van de broncode van bestaande,
-werkende tools ([ESGST](https://github.com/rafaelgomesxyz/esgst) voor SteamGifts,
-[hb-key-exporter](https://github.com/MrMarble/hb-key-exporter) voor Humble), maar
-zijn niet tegen de live sites geverifieerd. **Stap 2 is daarom niet optioneel.**
+De SteamGifts-selectors zijn afgeleid van de broncode van
+[ESGST](https://github.com/rafaelgomesxyz/esgst), dat dit formulier al jaren
+aanstuurt, maar zijn niet tegen de live site geverifieerd. Van de Humble-kant is
+alleen `.js-keyfield` met de key in `title` op de echte pagina bevestigd; de
+rij-opbouw eromheen is een heuristiek. **Stap 2 is daarom niet optioneel.**
 
 ## 0. Laden
 
@@ -31,22 +32,30 @@ DevTools dicht.
 ## 1. Voorbereiding
 
 - Ingelogd op `humblebundle.com` en op `steamgifts.com`
-- Een Humble Choice-maand met minstens één spel dat je niet zelf wilt
+- De spellen die je wilt weggeven al opgehaald op de Humble-maandpagina — de
+  extensie claimt zelf niets
 - Genoeg SteamGifts-punten en een vrije giveaway-slot
 
 ## 2. Diagnose — verandert niets
 
-**Humble:** open je maandpagina (`humblebundle.com/membership/<maand>`), dan in
-het zijpaneel **Diagnose → Humble**. Verwacht:
+**Humble:** open je keys-pagina — `humblebundle.com/home/keys`, of de
+downloadpagina van de bundel (`/downloads?key=…`). Dan in het zijpaneel
+**Diagnose → Humble**. Verwacht:
 
-- ✓ Paginamodel (JSON-blob) — meldt welke `#webpack-…`-blob gevonden is
-- ✓ Maand-gamekey
+- ✓ Soort pagina — moet je keys-pagina noemen, niet `/membership/…`
+- ✓ Keyvelden op de pagina — het aantal moet kloppen met wat je op het scherm
+  ziet, inclusief hoeveel er al onthuld zijn
+- ✓ Spelnamen uit de rijen gelezen — de eerste paar titels, ter controle
+- Order-sleutel — ✓ op `/downloads?key=…`; op `/home/keys` mag dit ✕ zijn, dan
+  mist alleen het Steam-appid en wordt er op titel gezocht
 - ✓ CSRF-token
-- ✓ Humble JSON-API — met het aantal bruikbare Steam-keys
 
-Staat "Spellen op de maandpagina" hoger dan het aantal keys, dan heb je een deel
-van de maand nog niet geclaimd. Claim die eerst op Humble zelf; zonder claim
-bestaat er nog geen key.
+Bovenaan staat op welke tab het gedraaid heeft. Klopt dat niet, dan had je
+meerdere Humble-tabs open — sluit de andere en probeer opnieuw.
+
+Onderaan staat een voorbeeldrij met de keys eruit gefilterd. Zijn de spelnamen
+leeg of onzinnig, dan heeft Humble de opmaak gewijzigd: `humble.keyField`,
+`rowContainers` en `rowName` in `lib/selectors.js` bijstellen.
 
 **SteamGifts:** open `steamgifts.com/giveaways/new`, dan **Diagnose →
 SteamGifts**. Alle velden moeten ✓ zijn. Een ✕ betekent dat SteamGifts die
@@ -57,25 +66,25 @@ nodig als je de giveaway wilt beperken.
 
 ## 3. Catalogus lezen — verandert niets
 
-Op de maandpagina:
+Op de keys-pagina:
 
 - Onderin verschijnt de balk met "N spellen gevonden"
-- Tegels hebben een **Giveaway**-vinkje (best-effort; ontbreekt dat, dan is dat
-  geen blocker — het tabblad **Humble** in het zijpaneel werkt altijd)
+- Elke rij met een key krijgt een **Giveaway**-vinkje
 - Aanvinken telt mee in de balk en in het zijpaneel
+- In het zijpaneel filtert het zoekveld de lijst (nuttig op `/home/keys`)
 
 ## 4. Eén key ophalen
 
-Kies **eerst een spel waarvan de key al onthuld is** — dat staat in het
-zijpaneel als "key al onthuld". Dan wordt er geen nieuwe reveal gedaan en test je
-alleen het leespad.
+Kies **eerst een spel waarvan de key al zichtbaar is** — in het zijpaneel staat
+daar "key al onthuld" bij. Dan wordt er niets onthuld en test je alleen het
+leespad.
 
 1. Aanvinken → **Make giveaway**
 2. Het spel verschijnt in de wachtrij met status *wacht*
 3. Er staat géén "geen key meer opgeslagen" bij
 
-Werkt dat, doe dan hetzelfde met een nog niet onthuld spel. Dit is de eerste
-onomkeerbare stap: de key wordt bij Humble definitief onthuld.
+Werkt dat, doe dan hetzelfde met een spel waarvan de key nog verborgen is. Dit is
+de eerste onomkeerbare stap: de key wordt bij Humble definitief onthuld.
 
 ## 5. Eén giveaway, handmatig verzenden
 
@@ -113,6 +122,8 @@ binnen twee minuten.
 
 | Geval | Verwacht |
 |---|---|
+| Maandpagina openen | Alleen een balkje met "naar mijn keys"; verder wordt daar niets gelezen |
+| `/home/keys` met honderden spellen | Lijst is doorzoekbaar; **Hele bibliotheek** haalt ook orders op die niet op de pagina staan |
 | Spel dat SteamGifts niet kent | Wachtrij pauzeert, status *keuze nodig*, kandidaten in het zijpaneel |
 | Meerdere kandidaten (bijv. een spel met edities) | Idem; na het kiezen gaat de wachtrij door |
 | SteamGifts-tab tussentijds sluiten | **Start** opent een nieuwe tab op het juiste item |

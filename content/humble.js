@@ -1,33 +1,82 @@
 /**
  * Content script voor humblebundle.com.
  *
- * Doet drie dingen: de maandcatalogus uitlezen, keys onthullen, en een balk +
- * vinkjes op de pagina zetten zodat je spellen kunt aanvinken.
+ * Werkt op de **keys-pagina** (`/downloads?key=…` of `/home/keys`). Daar staan
+ * de keys die je op de maandpagina hebt opgehaald, en daar begint dus onze flow:
+ * aanvinken wat je weg wilt geven → keys ophalen → wachtrij.
+ *
+ * De DOM is de primaire bron. Het keyveld ziet er zo uit:
+ *
+ *   <div class="js-keyfield keyfield redeemed enabled" title="XXXXX-YYYYY-ZZZZZ">
+ *
+ * De JSON-API is de aanvulling: die levert `steam_app_id`, `key_type`,
+ * `machine_name` en `keyindex`. Het appid is wat de SteamGifts-kant eenduidig
+ * laat matchen, dus die aanvulling is de moeite waard — maar zonder werkt het
+ * ook, dan wordt er op titel gezocht.
+ *
+ * (Eerder haalde dit script alles uit een JSON-blob op de membership-pagina.
+ * Die blob staat er niet meer, waardoor de scan terugviel op álle orders en de
+ * hele bibliotheek toonde in plaats van de maand.)
  *
  * Alle netwerkcalls naar Humble gebeuren hier en nergens anders. Vanuit de
  * service worker zouden het cross-origin requests worden — die zijn in MV3
- * CORS-geblokkeerd, en Humble zit bovendien achter Cloudflare, dat verkeer met
- * een afwijkende herkomst niet waardeert. Same-origin vanuit de pagina zelf
- * gaat gewoon goed en stuurt de sessiecookie mee.
+ * CORS-geblokkeerd, en Humble zit bovendien achter Cloudflare. Same-origin
+ * vanuit de pagina zelf gaat goed en stuurt de sessiecookie mee.
  */
 'use strict';
 
 (() => {
   const { MSG, SELECTORS } = HSG;
+  const H = SELECTORS.humble;
+
   const state = {
     gamekey: null,
     csrf: null,
     games: [],
     byId: new Map(),
     selected: new Set(),
-    monthGameCount: null,
+    /** Keys die al in de DOM stonden. Bewust apart: deze gaan nooit mee in de
+     *  catalogus, want die belandt via de service worker in storage.local. */
+    domKeys: new Map(),
+    /** DOM-element per catalogusregel, voor de onthul-terugval. */
+    domNodes: new Map(),
+    source: null,
     scanError: null,
+    lastKeyFieldCount: 0,
   };
 
-  // --- paginamodel -----------------------------------------------------------
+  const page = {
+    get isKeysPage() {
+      return (
+        location.pathname.startsWith('/home/keys') ||
+        location.pathname.startsWith('/downloads')
+      );
+    },
+    get isMembership() {
+      return /^\/(membership|subscription)(\/|$)/.test(location.pathname);
+    },
+  };
 
+  // --- herkomst van de order ---------------------------------------------------
+
+  /**
+   * De order-sleutel. Op `/downloads?key=…` staat die gewoon in de URL — veruit
+   * de betrouwbaarste bron, en precies waarom deze pagina zoveel beter werkt
+   * dan de maandpagina.
+   */
+  function readGamekey() {
+    const fromUrl = new URLSearchParams(location.search).get('key');
+    if (fromUrl) return fromUrl;
+
+    const model = readPageModel();
+    if (!model) return null;
+    const options = model.data && model.data.contentChoiceOptions;
+    return (options && options.gamekey) || (model.data && model.data.gamekey) || null;
+  }
+
+  /** Bonus-bron; op de meeste pagina's afwezig. */
   function readPageModel() {
-    for (const id of SELECTORS.humble.modelScriptIds) {
+    for (const id of H.modelScriptIds) {
       const el = document.getElementById(id);
       if (!el || !el.textContent) continue;
       try {
@@ -39,30 +88,13 @@
     return null;
   }
 
-  function readGamekey(model) {
-    if (!model) return null;
-    const options = model.data && model.data.contentChoiceOptions;
-    return (options && options.gamekey) || (model.data && model.data.gamekey) || null;
-  }
-
-  function readMonthGameCount(model) {
-    const options = model && model.data && model.data.contentChoiceOptions;
-    const data = options && options.contentChoiceData;
-    if (!data) return null;
-    for (const value of Object.values(data)) {
-      if (value && value.content_choices) {
-        return Object.keys(value.content_choices).length;
-      }
-    }
-    return null;
-  }
-
-  function readCsrfToken(model) {
+  function readCsrfToken() {
+    const model = readPageModel();
     const raw = model && model.data && model.data.csrfTokenInput;
     const fromModel = typeof raw === 'string' && raw.match(/value=["']([^"']+)["']/);
     if (fromModel) return fromModel[1];
 
-    const input = document.querySelector(SELECTORS.humble.csrfInput);
+    const input = document.querySelector(H.csrfInput);
     const fromDom = input && input.getAttribute('value');
     if (fromDom) return fromDom;
 
@@ -70,7 +102,86 @@
     return cookie ? decodeURIComponent(cookie[1]) : null;
   }
 
-  // --- Humble API ------------------------------------------------------------
+  // --- DOM-scan ----------------------------------------------------------------
+
+  /** Klimt vanaf het keyveld omhoog naar de rij die er omheen zit. */
+  function findRow(keyField) {
+    for (const selector of H.rowContainers) {
+      const row = keyField.closest(selector);
+      if (row && row !== keyField) return row;
+    }
+    return keyField.parentElement || keyField;
+  }
+
+  /** Verzamelt de losse teksten in een rij, zonder die van het keyveld zelf. */
+  function rowTexts(row, keyField) {
+    const texts = [];
+    const named = row.querySelector(H.rowName);
+    if (named && !keyField.contains(named)) texts.push(named.textContent);
+
+    for (const el of row.querySelectorAll('*')) {
+      if (el.children.length > 0) continue;
+      if (keyField.contains(el) || el === keyField) continue;
+      texts.push(el.textContent);
+    }
+    return texts;
+  }
+
+  function rowPlatform(row) {
+    for (const el of row.querySelectorAll(H.platformIcon)) {
+      const platform = HSG.detectPlatform(el.className);
+      if (platform) return platform;
+    }
+    return HSG.detectPlatform(row.className);
+  }
+
+  /**
+   * Leest wat er op deze pagina aan keys staat. Doet geen enkel netwerkverzoek
+   * en onthult niets — puur wat al zichtbaar is.
+   */
+  function scanDom() {
+    const entries = [];
+    const seen = new Set();
+
+    document.querySelectorAll(H.keyField).forEach((keyField, index) => {
+      const row = findRow(keyField);
+      const humanName = HSG.pickRowName(rowTexts(row, keyField));
+      if (!humanName) return;
+
+      const revealedKey = keyField.classList.contains(H.redeemedClass)
+        ? (keyField.getAttribute('title') || '').trim()
+        : '';
+
+      // Zonder machine_name (die komt uit de API) is de genormaliseerde naam de
+      // enige stabiele sleutel. Stabiel is hier belangrijk: onder deze id staat
+      // straks de key in session storage.
+      const slug = HSG.normalizeTitle(humanName).replace(/\s+/g, '-') || `rij-${index}`;
+      const id = HSG.itemId(state.gamekey || 'dom', slug);
+      if (seen.has(id)) return;
+      seen.add(id);
+
+      entries.push({
+        id,
+        machineName: null,
+        humanName,
+        gamekey: state.gamekey || null,
+        keyindex: null,
+        steamAppId: null,
+        keyType: rowPlatform(row),
+        revealed: Boolean(revealedKey),
+        disallowedCountries: [],
+        bundleName: null,
+        fromDom: true,
+      });
+
+      if (revealedKey) state.domKeys.set(id, revealedKey);
+      state.domNodes.set(id, keyField);
+    });
+
+    return entries;
+  }
+
+  // --- Humble API --------------------------------------------------------------
 
   async function fetchJson(url) {
     const response = await fetch(url, {
@@ -101,8 +212,8 @@
     return orders;
   }
 
-  /** Zet een order-object om in onze catalogusregels. */
-  function toCatalogEntries(order) {
+  /** Zet een order-object om in catalogusregels. */
+  function toApiEntries(order) {
     const gamekey = order && order.gamekey;
     const tpks = (order && order.tpkd_dict && order.tpkd_dict.all_tpks) || [];
     return tpks.filter(HSG.isUsableTpk).map((tpk) => ({
@@ -112,49 +223,108 @@
       gamekey,
       keyindex: tpk.keyindex != null ? tpk.keyindex : 0,
       steamAppId: HSG.normalizeAppId(tpk.steam_app_id),
+      keyType: 'steam',
       revealed: Boolean(tpk.redeemed_key_val),
       disallowedCountries: tpk.disallowed_countries || [],
       bundleName: (order.product && order.product.human_name) || null,
+      fromDom: false,
     }));
   }
 
   /**
-   * @param {boolean} deep Ook alle andere orders ophalen (voor /home/keys).
-   *   De maandpagina heeft genoeg aan zijn eigen order en is dan veel sneller.
+   * Voegt DOM- en API-regels samen op genormaliseerde titel.
+   *
+   * De API wint qua metadata (machine_name, appid, keyindex — daar kunnen we
+   * mee onthullen en zoeken), de DOM levert de key die al zichtbaar was. Staat
+   * een spel alleen in de DOM, dan gaat het mee zonder appid.
    */
-  async function scan(deep) {
-    const model = readPageModel();
-    state.csrf = readCsrfToken(model);
-    state.gamekey = readGamekey(model);
-    state.monthGameCount = readMonthGameCount(model);
-    state.scanError = null;
-
-    let orders;
-    if (state.gamekey && !deep) {
-      orders = [await fetchOrder(state.gamekey)];
-    } else if (state.gamekey && deep) {
-      orders = await fetchAllOrders();
-    } else {
-      orders = await fetchAllOrders();
+  function merge(domEntries, apiEntries) {
+    const byName = new Map();
+    for (const entry of apiEntries) {
+      byName.set(HSG.normalizeTitle(entry.humanName), entry);
     }
 
-    const games = orders.flatMap(toCatalogEntries);
+    const merged = [];
+    const usedApi = new Set();
+
+    for (const domEntry of domEntries) {
+      const match = byName.get(HSG.normalizeTitle(domEntry.humanName));
+      if (!match) {
+        merged.push(domEntry);
+        continue;
+      }
+      usedApi.add(match.id);
+
+      // De id verspringt naar die van de API-regel; de al gelezen key en het
+      // DOM-element moeten mee, anders raken we ze kwijt.
+      const domKey = state.domKeys.get(domEntry.id);
+      const node = state.domNodes.get(domEntry.id);
+      if (domKey) state.domKeys.set(match.id, domKey);
+      if (node) state.domNodes.set(match.id, node);
+
+      merged.push({ ...match, revealed: match.revealed || domEntry.revealed });
+    }
+
+    // API-regels die niet in de DOM staan (bijv. buiten de zichtbare pagina)
+    // horen er ook bij.
+    for (const entry of apiEntries) {
+      if (!usedApi.has(entry.id)) merged.push(entry);
+    }
+    return merged;
+  }
+
+  /**
+   * @param {'page'|'library'} scope `page` = wat op deze pagina staat (snel),
+   *   `library` = alle orders van het account ophalen (traag, honderden spellen).
+   */
+  async function scan(scope) {
+    state.scanError = null;
+    state.gamekey = readGamekey();
+    state.csrf = readCsrfToken();
+    state.domKeys.clear();
+    state.domNodes.clear();
+
+    const domEntries = scanDom();
+
+    let apiEntries = [];
+    let apiError = null;
+    try {
+      if (scope === 'library') {
+        apiEntries = (await fetchAllOrders()).flatMap(toApiEntries);
+      } else if (state.gamekey) {
+        apiEntries = toApiEntries(await fetchOrder(state.gamekey));
+      }
+    } catch (error) {
+      // Niet fataal: zonder API missen we alleen het appid.
+      apiError = String(error.message || error);
+    }
+
+    const games = domEntries.length > 0 ? merge(domEntries, apiEntries) : apiEntries;
+    if (domEntries.length > 0) state.source = apiEntries.length ? 'dom+api' : 'dom';
+    else state.source = apiEntries.length ? 'api' : 'leeg';
+
     games.sort((a, b) => a.humanName.localeCompare(b.humanName, 'nl'));
 
     state.games = games;
+    state.lastKeyFieldCount = document.querySelectorAll(H.keyField).length;
     state.byId = new Map(games.map((game) => [game.id, game]));
     for (const id of Array.from(state.selected)) {
       if (!state.byId.has(id)) state.selected.delete(id);
     }
+    state.scanError = apiError;
     return games;
   }
 
   function catalogPayload() {
     return {
+      // Let op: `games` gaat naar storage.local. Nooit keys meesturen —
+      // die leven uitsluitend in storage.session, gezet door de service worker.
       games: state.games,
       gamekey: state.gamekey,
-      monthGameCount: state.monthGameCount,
       pageUrl: location.href,
+      source: state.source,
+      keyFieldCount: document.querySelectorAll(H.keyField).length,
+      apiError: state.scanError,
       hasCsrf: Boolean(state.csrf),
     };
   }
@@ -163,13 +333,13 @@
     return send({ type: MSG.HUMBLE_CATALOG, catalog: catalogPayload() });
   }
 
-  // --- keys onthullen --------------------------------------------------------
+  // --- keys onthullen ----------------------------------------------------------
 
   /**
-   * Onthult één key. `gift` wordt bewust nooit meegestuurd: dat levert een
+   * Onthult via de API. `gift` wordt bewust nooit meegestuurd: dat levert een
    * gift-link in plaats van een key op en is onomkeerbaar.
    */
-  async function revealOne(game) {
+  async function revealViaApi(game) {
     const headers = {
       'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8',
     };
@@ -182,7 +352,7 @@
       body: new URLSearchParams({
         keytype: game.machineName,
         key: game.gamekey,
-        keyindex: String(game.keyindex),
+        keyindex: String(game.keyindex != null ? game.keyindex : 0),
       }),
     });
 
@@ -193,40 +363,61 @@
       throw new Error(`Onverwacht antwoord van Humble (HTTP ${response.status})`);
     }
     if (!data || data.success !== true || !data.key) {
-      throw new Error(data && (data.error_msg || data.error) ? String(data.error_msg || data.error) : 'Onthullen mislukt');
+      const reason = data && (data.error_msg || data.error);
+      throw new Error(reason ? String(reason) : 'Onthullen mislukt');
     }
     return data.key;
   }
 
   /**
-   * Haalt de keys op voor de gegeven ids. Vraagt de order opnieuw op zodat
-   * `redeemed_key_val` actueel is — al onthulde keys hoeven niet opnieuw door
-   * `/humbler/redeemkey` heen.
+   * Terugval als we geen machine_name/keyindex hebben: het keyveld op de pagina
+   * aanklikken en wachten tot `title` gevuld wordt.
+   */
+  async function revealViaDom(game) {
+    const node = state.domNodes.get(game.id);
+    if (!node) throw new Error('Geen keyveld op deze pagina gevonden.');
+
+    const existing = (node.getAttribute('title') || '').trim();
+    if (existing) return existing;
+
+    HSG.clickWidget(node);
+    const value = await HSG.waitForAttribute(node, 'title', { timeout: 15000 });
+    const key = String(value || '').trim();
+    if (!key) throw new Error('Het keyveld bleef leeg.');
+    return key;
+  }
+
+  /**
+   * Haalt de keys op voor de gegeven ids, in volgorde van goedkoop naar duur:
+   * wat al in de DOM stond, dan de order opnieuw opvragen, dan pas onthullen.
    */
   async function revealKeys(ids, delayMs) {
-    // Het zijpaneel werkt op een catalogus die in storage staat; dit content
-    // script kan intussen herladen zijn (navigatie, extensie-reload). Dan is
-    // state leeg en zouden we stilletjes niets doen.
-    if (state.byId.size === 0) await scan(true);
+    // Het zijpaneel werkt op een catalogus uit storage; dit script kan intussen
+    // herladen zijn. Dan is state leeg en zouden we stil niets doen.
+    if (state.byId.size === 0) await scan('page');
 
     const wanted = ids.map((id) => state.byId.get(id)).filter(Boolean);
     if (wanted.length === 0) {
       throw new Error(
-        'Deze spellen staan niet in de catalogus van deze pagina. Scan opnieuw op je Humble-maandpagina.'
+        'Deze spellen staan niet op deze pagina. Open je keys-pagina en scan opnieuw.'
       );
     }
 
-    const gamekeys = Array.from(new Set(wanted.map((game) => game.gamekey)));
+    // Eén keer de order ophalen levert alle al onthulde keys in één klap.
     const known = new Map();
+    const gamekeys = Array.from(
+      new Set(wanted.map((game) => game.gamekey).filter(Boolean))
+    );
     for (const gamekey of gamekeys) {
       try {
         const order = await fetchOrder(gamekey);
         const tpks = (order && order.tpkd_dict && order.tpkd_dict.all_tpks) || [];
         for (const tpk of tpks) {
-          known.set(HSG.itemId(gamekey, tpk.machine_name), tpk.redeemed_key_val || null);
+          if (!tpk.redeemed_key_val) continue;
+          known.set(HSG.itemId(gamekey, tpk.machine_name), tpk.redeemed_key_val);
         }
       } catch (error) {
-        // Niet fataal: we vallen terug op onthullen.
+        // Niet fataal: we vallen terug op de DOM of op onthullen.
       }
     }
 
@@ -234,19 +425,31 @@
     for (let i = 0; i < wanted.length; i += 1) {
       const game = wanted[i];
       const base = {
-        machineName: game.machineName,
+        machineName: game.machineName || game.id.split(':').pop(),
         humanName: game.humanName,
-        gamekey: game.gamekey,
-        keyindex: game.keyindex,
+        gamekey: game.gamekey || 'dom',
+        keyindex: game.keyindex != null ? game.keyindex : 0,
         steamAppId: game.steamAppId,
-        disallowedCountries: game.disallowedCountries,
+        disallowedCountries: game.disallowedCountries || [],
       };
       try {
-        const existing = known.get(game.id);
-        const key = existing || (await revealOne(game));
-        results.push({ ...base, key, wasAlreadyRevealed: Boolean(existing) });
+        const cached = state.domKeys.get(game.id) || known.get(game.id) || null;
+        let key = cached;
+        let didReveal = false;
+
+        if (!key) {
+          key =
+            game.machineName && game.gamekey
+              ? await revealViaApi(game)
+              : await revealViaDom(game);
+          didReveal = true;
+        }
+
+        results.push({ ...base, key, wasAlreadyRevealed: !didReveal });
         game.revealed = true;
-        if (!existing && i < wanted.length - 1) {
+        state.domKeys.set(game.id, key);
+
+        if (didReveal && i < wanted.length - 1) {
           await HSG.sleep(delayMs != null ? delayMs : 700);
         }
       } catch (error) {
@@ -256,7 +459,7 @@
     return results;
   }
 
-  // --- berichten -------------------------------------------------------------
+  // --- berichten ---------------------------------------------------------------
 
   function send(message) {
     return chrome.runtime.sendMessage(message).catch(() => null);
@@ -270,7 +473,7 @@
     const run = async () => {
       switch (message.type) {
         case MSG.HUMBLE_SCAN: {
-          await scan(true);
+          await scan(message.scope === 'library' ? 'library' : 'page');
           renderUi();
           await publishCatalog();
           return { catalog: catalogPayload() };
@@ -293,66 +496,84 @@
     return true;
   });
 
-  // --- diagnose (read-only) --------------------------------------------------
+  // --- diagnose (read-only) ----------------------------------------------------
+
+  /** Eén rij als HTML, met alle keys eruit gefilterd. */
+  function sampleRow() {
+    const keyField = document.querySelector(H.keyField);
+    if (!keyField) return 'geen keyveld op deze pagina';
+    return findRow(keyField)
+      .outerHTML.replace(/title="[^"]*"/g, 'title="KEY-WEGGELATEN"')
+      .replace(/[A-Z0-9]{5}(-[A-Z0-9]{5}){2,4}/gi, 'KEY-WEGGELATEN')
+      .slice(0, 900);
+  }
 
   async function diagnose() {
-    const model = readPageModel();
+    const keyFields = document.querySelectorAll(H.keyField);
+    const redeemed = document.querySelectorAll(
+      `${H.keyField}.${H.redeemedClass}`
+    );
+    const gamekey = readGamekey();
+    const domEntries = scanDom();
+
     const checks = [
       {
-        label: 'Paginamodel (JSON-blob)',
-        ok: Boolean(model),
-        detail: model ? `#${model.id}` : SELECTORS.humble.modelScriptIds.join(', '),
+        label: 'Soort pagina',
+        ok: page.isKeysPage,
+        detail: page.isKeysPage
+          ? location.pathname
+          : `${location.pathname} — open je keys-pagina (/downloads?key=… of /home/keys)`,
       },
       {
-        label: 'Maand-gamekey',
-        ok: Boolean(readGamekey(model)),
-        detail: readGamekey(model) ? 'gevonden' : 'niet gevonden — scan valt terug op alle orders',
+        label: 'Keyvelden op de pagina',
+        ok: keyFields.length > 0,
+        detail: `${keyFields.length} gevonden, waarvan ${redeemed.length} al onthuld (${H.keyField})`,
+      },
+      {
+        label: 'Spelnamen uit de rijen gelezen',
+        ok: domEntries.length > 0,
+        detail:
+          domEntries.length > 0
+            ? domEntries
+                .slice(0, 5)
+                .map((entry) => entry.humanName)
+                .join(' · ')
+            : 'geen naam kunnen bepalen — zie de rij-dump hieronder',
+      },
+      {
+        label: 'Order-sleutel',
+        ok: Boolean(gamekey),
+        detail: gamekey
+          ? 'gevonden in de URL of het paginamodel'
+          : 'niet gevonden — werkt nog, maar zonder Steam-appid uit de API',
       },
       {
         label: 'CSRF-token',
-        ok: Boolean(readCsrfToken(model)),
-        detail: readCsrfToken(model) ? 'gevonden' : 'niet gevonden',
-      },
-      {
-        label: 'Pagina-root voor onze balk',
-        ok: Boolean(document.querySelector(SELECTORS.humble.pageRoot)),
-        detail: SELECTORS.humble.pageRoot,
+        ok: Boolean(readCsrfToken()),
+        detail: readCsrfToken() ? 'gevonden' : 'niet gevonden',
       },
     ];
 
     let apiOk = false;
-    let apiDetail = 'niet geprobeerd';
-    const gamekey = readGamekey(model);
+    let apiDetail = 'overgeslagen: geen order-sleutel op deze pagina';
     try {
       if (gamekey) {
         const order = await fetchOrder(gamekey);
         const tpks = (order && order.tpkd_dict && order.tpkd_dict.all_tpks) || [];
-        const steamKeys = tpks.filter(HSG.isUsableTpk);
         apiOk = true;
-        apiDetail = `${tpks.length} keys in de order, waarvan ${steamKeys.length} bruikbare Steam-keys`;
-      } else {
-        const list = await fetchJson('/api/v1/user/order');
-        apiOk = Array.isArray(list);
-        apiDetail = `${(list || []).length} orders op je account`;
+        apiDetail = `${tpks.length} keys in deze order, waarvan ${tpks.filter(HSG.isUsableTpk).length} bruikbare Steam-keys`;
       }
     } catch (error) {
       apiDetail = String(error.message || error);
     }
-    checks.push({ label: 'Humble JSON-API', ok: apiOk, detail: apiDetail });
+    checks.push({ label: 'Humble JSON-API', ok: apiOk || !gamekey, detail: apiDetail });
 
-    const monthCount = readMonthGameCount(model);
-    if (monthCount != null) {
-      checks.push({
-        label: 'Spellen op de maandpagina',
-        ok: true,
-        detail: String(monthCount),
-      });
-    }
+    checks.push({ label: 'Voorbeeldrij (keys weggelaten)', ok: true, detail: sampleRow() });
 
     return { site: 'humble', checks };
   }
 
-  // --- UI op de pagina -------------------------------------------------------
+  // --- UI op de pagina ---------------------------------------------------------
 
   let bar = null;
 
@@ -371,6 +592,23 @@
       </button>
     `;
     bar.addEventListener('click', onBarClick);
+    document.body.appendChild(bar);
+    return bar;
+  }
+
+  /** Op de maandpagina ontleden we niets meer; alleen de weg wijzen. */
+  function ensureHintBar() {
+    if (bar && document.body.contains(bar)) return bar;
+    bar = document.createElement('div');
+    bar.className = 'hsg-bar';
+    bar.innerHTML = `
+      <span class="hsg-bar__title">Humble → SteamGifts</span>
+      <span class="hsg-bar__status">
+        Haal hier de spellen op die je wilt weggeven, en ga daarna naar je keys.
+      </span>
+      <span class="hsg-bar__spacer"></span>
+      <a class="hsg-btn hsg-btn--primary" href="/home/keys">Naar mijn keys</a>
+    `;
     document.body.appendChild(bar);
     return bar;
   }
@@ -434,42 +672,25 @@
   }
 
   /**
-   * Plaatst een vinkje op de tegel van elk spel.
-   *
-   * Bewust best-effort: de opmaak van Humble is niet gedocumenteerd en verandert.
-   * Lukt het niet, dan blijft de balk en het zijpaneel gewoon werken — daar leunt
-   * de rest van de extensie op.
+   * Een <label> rechtstreeks in een <tr> hangen is ongeldige HTML — de browser
+   * schuift 'm dan buiten de tabel. In een tabelrij gaat hij dus in de eerste cel.
    */
-  function injectTileCheckboxes() {
-    const remaining = new Map();
+  function checkboxHost(row) {
+    if (row.tagName === 'TR') return row.querySelector('td, th') || row;
+    return row;
+  }
+
+  /** Zet een vinkje in elke rij die een key bevat. */
+  function injectRowCheckboxes() {
+    let placed = 0;
     for (const game of state.games) {
-      remaining.set(HSG.normalizeTitle(game.humanName), game);
-    }
+      const keyField = state.domNodes.get(game.id);
+      if (!keyField) continue;
+      const row = findRow(keyField);
+      if (!row || row.querySelector('.hsg-tile-check')) continue;
 
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT, {
-      acceptNode(node) {
-        if (node.closest('.hsg-bar, .hsg-tile-check')) return NodeFilter.FILTER_REJECT;
-        if (node.children.length > 0) return NodeFilter.FILTER_SKIP;
-        const text = node.textContent;
-        if (!text || text.length > 100) return NodeFilter.FILTER_SKIP;
-        return NodeFilter.FILTER_ACCEPT;
-      },
-    });
-
-    const placements = [];
-    while (walker.nextNode() && remaining.size > 0) {
-      const node = walker.currentNode;
-      const game = remaining.get(HSG.normalizeTitle(node.textContent));
-      if (!game) continue;
-      const tile = findTile(node);
-      if (!tile || tile.querySelector('.hsg-tile-check')) continue;
-      remaining.delete(HSG.normalizeTitle(node.textContent));
-      placements.push({ tile, game });
-    }
-
-    for (const { tile, game } of placements) {
       const label = document.createElement('label');
-      label.className = 'hsg-tile-check';
+      label.className = 'hsg-tile-check hsg-tile-check--inline';
       label.dataset.hsgId = game.id;
       label.title = `${game.humanName} — aanvinken om als giveaway weg te geven`;
 
@@ -486,37 +707,19 @@
       text.textContent = 'Giveaway';
 
       label.append(input, text);
-      // De tegel zelf is een link naar de spelpagina; die willen we niet openen.
       label.addEventListener('click', (event) => event.stopPropagation());
-
-      if (getComputedStyle(tile).position === 'static') {
-        tile.classList.add('hsg-tile-anchor');
-      }
-      tile.appendChild(label);
+      const host = checkboxHost(row);
+      host.insertBefore(label, host.firstChild);
+      placed += 1;
     }
-
-    return placements.length;
-  }
-
-  /** Klimt vanaf de titel omhoog tot iets dat op een tegel lijkt. */
-  function findTile(node) {
-    let element = node.parentElement;
-    for (let depth = 0; element && depth < 6; depth += 1) {
-      const looksLikeTile =
-        element.querySelector('img') ||
-        /url\(/.test(getComputedStyle(element).backgroundImage || '');
-      if (looksLikeTile && element.clientHeight > 60) return element;
-      element = element.parentElement;
-    }
-    return node.parentElement;
+    return placed;
   }
 
   function renderUi() {
     if (state.games.length === 0) return;
     ensureBar();
-    injectTileCheckboxes();
+    injectRowCheckboxes();
 
-    // Vinkjes gelijktrekken met de selectie (bijv. na "Alles" of "Niets").
     document.querySelectorAll('.hsg-tile-check').forEach((label) => {
       const input = label.querySelector('input');
       const wanted = state.selected.has(label.dataset.hsgId);
@@ -525,27 +728,30 @@
 
     const selected = state.selected.size;
     const addButton = bar.querySelector('[data-action="add"]');
-    addButton.textContent =
-      selected > 1 ? `Make ${selected} giveaways` : 'Make giveaway';
-    addButton.disabled = selected === 0;
+    if (addButton) {
+      addButton.textContent =
+        selected > 1 ? `Make ${selected} giveaways` : 'Make giveaway';
+      addButton.disabled = selected === 0;
+    }
     setStatus(
       `${state.games.length} ${state.games.length === 1 ? 'spel' : 'spellen'} gevonden · ${selected} geselecteerd`
     );
   }
 
-  // --- opstarten -------------------------------------------------------------
+  // --- opstarten ---------------------------------------------------------------
 
   async function boot() {
+    if (page.isMembership) {
+      ensureHintBar();
+      return;
+    }
+    if (!page.isKeysPage) return;
+
     try {
-      const model = readPageModel();
-      const gamekey = readGamekey(model);
-      // Zonder maand-gamekey (bijv. op /home/keys) is een automatische scan te
-      // duur: die zou álle orders ophalen. Daar wacht de gebruiker op de knop.
-      if (!gamekey) return;
-      await scan(false);
+      await scan('page');
       if (state.games.length === 0) {
         ensureBar();
-        setStatus('Geen bruikbare Steam-keys in deze order gevonden.');
+        setStatus('Geen keys op deze pagina gevonden.');
       } else {
         renderUi();
       }
@@ -557,21 +763,31 @@
     }
   }
 
-  // Humble is een SPA: na navigeren binnen de maandpagina moeten de vinkjes terug.
-  // Mutaties in onze eigen UI negeren, anders houdt renderUi zichzelf aan de gang.
-  let reinjectTimer = null;
+  // De keys-pagina rendert rijen bij (paginering, "toon meer"). Mutaties in onze
+  // eigen UI negeren, anders houdt renderUi zichzelf aan de gang.
+  let rescanTimer = null;
   const observer = new MutationObserver((mutations) => {
-    if (state.games.length === 0) return;
+    if (!page.isKeysPage) return;
     const fromPage = mutations.some((mutation) => {
       const target = mutation.target;
-      return (
-        !(target instanceof Element) ||
-        !target.closest('.hsg-bar, .hsg-tile-check')
-      );
+      return !(target instanceof Element) || !target.closest('.hsg-bar, .hsg-tile-check');
     });
     if (!fromPage) return;
-    clearTimeout(reinjectTimer);
-    reinjectTimer = setTimeout(() => renderUi(), 400);
+
+    clearTimeout(rescanTimer);
+    rescanTimer = setTimeout(async () => {
+      // Alleen opnieuw scannen als er echt rijen bij of af zijn gekomen
+      // (paginering, "toon meer"). Anders alleen de vinkjes terugzetten —
+      // scannen doet een netwerkverzoek en dat hoeft hier niet.
+      const count = document.querySelectorAll(H.keyField).length;
+      if (count === state.lastKeyFieldCount) {
+        renderUi();
+        return;
+      }
+      await scan('page').catch(() => null);
+      renderUi();
+      await publishCatalog();
+    }, 600);
   });
   observer.observe(document.body, { childList: true, subtree: true });
 

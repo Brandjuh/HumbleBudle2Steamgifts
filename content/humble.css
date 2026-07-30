@@ -70,7 +70,13 @@
   background: #3a8bef;
 }
 
-/* Vinkje op een spel-tegel. */
+a.hsg-btn {
+  display: inline-flex;
+  align-items: center;
+  text-decoration: none;
+}
+
+/* Vinkje bij een spel. */
 
 .hsg-tile-anchor {
   position: relative;
@@ -91,6 +97,13 @@
   font: 600 11px/1 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   cursor: pointer;
   user-select: none;
+}
+
+/* In een keys-rij staat het vinkje gewoon in de tekstflow, niet over een tegel. */
+.hsg-tile-check--inline {
+  position: static;
+  margin-right: 8px;
+  vertical-align: middle;
 }
 
 .hsg-tile-check input {

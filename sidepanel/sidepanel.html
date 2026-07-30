@@ -38,11 +38,19 @@
     <!-- Humble -->
     <section class="panel" data-panel="humble">
       <div class="actions">
-        <button type="button" class="btn" data-action="scan">Opnieuw scannen</button>
+        <button type="button" class="btn" data-action="scan">Deze pagina scannen</button>
+        <button type="button" class="btn" data-action="scan-library">Hele bibliotheek</button>
         <button type="button" class="btn" data-action="select-all">Alles</button>
         <button type="button" class="btn" data-action="select-none">Niets</button>
       </div>
       <p class="hint" data-role="catalog-hint"></p>
+      <input
+        type="search"
+        class="filter"
+        data-role="catalog-filter"
+        placeholder="Zoek een spel…"
+        autocomplete="off"
+      />
       <ul class="catalog" data-role="catalog"></ul>
       <div class="actions actions--sticky">
         <button type="button" class="btn btn--primary" data-action="add-selected" disabled>
@@ -50,8 +58,10 @@
         </button>
       </div>
       <p class="hint hint--muted">
-        Toevoegen onthult de keys bij Humble. De key blijft bruikbaar zolang niemand
-        hem inwisselt, maar je kunt er daarna geen Humble-gift-link meer van maken.
+        Haal je spellen eerst op de maandpagina op ("Get game on Steam" of "show keys")
+        en open dan je keys-pagina — daar leest de extensie ze. Toevoegen onthult
+        keys die nog verborgen zijn; die blijven bruikbaar zolang niemand ze
+        inwisselt, maar er is daarna geen Humble-gift-link meer van te maken.
       </p>
     </section>
 

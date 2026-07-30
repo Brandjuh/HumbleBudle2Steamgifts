@@ -76,6 +76,25 @@ async function findTab(urlPattern) {
   return tabs.length ? tabs[0] : null;
 }
 
+/**
+ * De keys-pagina is waar het werk gebeurt, dus die krijgt voorrang boven een
+ * willekeurige andere Humble-tab. Anders draaide een scan of diagnose zomaar op
+ * de maandpagina, die niets bruikbaars bevat.
+ */
+async function findHumbleTab() {
+  const onKeys = await chrome.tabs.query({
+    url: [
+      'https://www.humblebundle.com/home/keys*',
+      'https://www.humblebundle.com/downloads*',
+    ],
+  });
+  if (onKeys.length) return onKeys[0];
+  return findTab('https://www.humblebundle.com/*');
+}
+
+const HUMBLE_TAB_HINT =
+  'Open je Humble keys-pagina (humblebundle.com/home/keys, of de downloadpagina van de bundel) en probeer opnieuw.';
+
 async function openOrFocusSteamGifts(queue) {
   if (queue.sgTabId != null) {
     try {
@@ -169,14 +188,14 @@ const handlers = {
   },
 
   /** Het zijpaneel vraagt de Humble-tab om opnieuw te scannen. */
-  async [MSG.HUMBLE_SCAN_REQUEST]() {
-    const tab = await findTab('https://www.humblebundle.com/*');
-    if (!tab) {
-      throw new Error(
-        'Geen Humble-tab open. Ga naar je Humble Choice-maandpagina en probeer opnieuw.'
-      );
-    }
-    const response = await chrome.tabs.sendMessage(tab.id, { type: MSG.HUMBLE_SCAN });
+  async [MSG.HUMBLE_SCAN_REQUEST](message) {
+    const tab = await findHumbleTab();
+    if (!tab) throw new Error(`Geen Humble-tab open. ${HUMBLE_TAB_HINT}`);
+
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: MSG.HUMBLE_SCAN,
+      scope: message.scope === 'library' ? 'library' : 'page',
+    });
     if (response && response.error) throw new Error(response.error);
     return response;
   },

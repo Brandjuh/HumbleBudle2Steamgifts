@@ -1,8 +1,8 @@
 # Humble → SteamGifts
 
-Privé Chrome-extensie (Manifest V3) die van Humble Choice-keys SteamGifts-giveaways
-maakt. Vink spellen aan op je Humble-maandpagina, de extensie haalt de keys op en
-vult per spel het formulier op `steamgifts.com/giveaways/new` volledig in —
+Privé Chrome-extensie (Manifest V3) die van Humble-keys SteamGifts-giveaways
+maakt. Vink spellen aan op je Humble **keys-pagina**, de extensie haalt de keys op
+en vult per spel het formulier op `steamgifts.com/giveaways/new` volledig in —
 inclusief de key. Jij drukt alleen nog op verzenden.
 
 Meerdere spellen tegelijk aanvinken kan: de extensie werkt ze daarna één voor één
@@ -25,16 +25,22 @@ resulterende publieke sleutel als `"key"` in `manifest.json`.
 ## Gebruik
 
 1. Log in op zowel `humblebundle.com` als `steamgifts.com`.
-2. Open je Humble Choice-maandpagina (`humblebundle.com/membership/…`).
-   Onderin verschijnt een balk met het aantal gevonden Steam-keys.
-3. Vink de spellen aan die je wilt weggeven — op de tegels zelf of in het
-   tabblad **Humble** van het zijpaneel.
+2. Haal op je Humble Choice-maandpagina de spellen op die je wilt weggeven, en
+   ga daarna naar de pagina waar de keys staan: `humblebundle.com/home/keys`, of
+   de downloadpagina van die bundel (`/downloads?key=…`).
+3. Onderin verschijnt een balk met het aantal gevonden spellen, en elke rij
+   krijgt een **Giveaway**-vinkje. Aanvinken kan ook in het tabblad **Humble**
+   van het zijpaneel.
 4. Klik op **Make giveaway**. De keys worden opgehaald en de spellen komen in de
    wachtrij.
 5. Ga naar het tabblad **Wachtrij** en klik op **Start**. Er opent een
    SteamGifts-tab met het formulier al ingevuld.
 6. Controleer, klik op **Review Giveaway** en bevestig. Zodra de giveaway
    bestaat, laadt de extensie het volgende spel in.
+
+De extensie claimt zelf niets bij Humble — welk spel je houdt en welk je weggeeft
+bepaal je in Humble's eigen UI. Dat is bewust: claimen is onomkeerbaar en kost bij
+sommige abonnementen een keuze.
 
 Herhaal stap 6 tot de wachtrij leeg is. Zet je in de instellingen *Automatisch
 verzenden* aan, dan drukt de extensie zelf op de knop na een aftelling die je
@@ -46,6 +52,10 @@ Tabblad **Diagnose** controleert of de extensie de velden op beide sites nog
 herkent. Het leest alleen; er wordt niets gewijzigd en geen key onthuld. Doe dit
 vóór je eerste echte giveaway — en opnieuw als er iets niet meer lukt, want dan
 zie je meteen of een van de twee sites zijn opmaak heeft gewijzigd.
+
+Het Humble-rapport vermeldt op welke tab het gedraaid heeft, hoeveel keyvelden er
+staan en hoeveel daarvan al onthuld zijn, plus een voorbeeldrij met de keys eruit
+gefilterd. Dat laatste maakt een gewijzigde opmaak in één oogopslag zichtbaar.
 
 De diagnose van SteamGifts toont ook de beschikbare **groep-id's en landcodes**,
 die je in de instellingen nodig hebt.
@@ -64,10 +74,19 @@ die je in de instellingen nodig hebt.
 
 ## Hoe het werkt
 
-- **Keys ophalen** gebeurt in het content script op humblebundle.com, via
-  Humble's eigen JSON-API (`/api/v1/order/…` en `/humbler/redeemkey`). Dat moet
-  vanaf de pagina zelf: same-origin, met je eigen sessiecookie. Vanuit de service
-  worker zou het een cross-origin request worden, en die zijn in MV3
+- **De catalogus** komt van de keys-pagina zelf. Elk keyveld ziet er zo uit:
+  `<div class="js-keyfield keyfield redeemed enabled" title="XXXXX-…">` — de key
+  staat in `title`, en `redeemed` betekent dat hij al onthuld is. Staat er een
+  order-sleutel in de URL (`/downloads?key=…`), dan wordt die lijst aangevuld
+  vanuit Humble's JSON-API met `steam_app_id` en `machine_name`.
+
+  Eerder werd dit uit een JSON-blob op de maandpagina gehaald. Die blob staat er
+  niet meer, waardoor de scan terugviel op álle orders en de hele bibliotheek
+  toonde in plaats van de maand.
+- **Keys ophalen** gebeurt in het content script op humblebundle.com: eerst wat al
+  in de DOM staat, dan `/api/v1/order/…`, en pas als laatste `/humbler/redeemkey`.
+  Dat moet vanaf de pagina zelf: same-origin, met je eigen sessiecookie. Vanuit de
+  service worker zou het een cross-origin request worden, en die zijn in MV3
   CORS-geblokkeerd.
 - **Het spel opzoeken** op SteamGifts gaat via hun autocomplete-endpoint, bij
   voorkeur op Steam appid. Humble levert die niet altijd; dan wordt op titel

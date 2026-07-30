@@ -89,3 +89,47 @@ test('pickGameMatch negeert rijen zonder id of naam', () => {
   const result = HSG.pickGameMatch(rows, 'Celeste');
   assert.equal(result.match.id, '3');
 });
+
+// --- keys-pagina: naam uit een rij vissen -----------------------------------
+
+test('pickRowName kiest de titel en negeert knoplabels en platform', () => {
+  assert.equal(
+    HSG.pickRowName(['Steam', 'Hollow Knight', 'Reveal your key', '']),
+    'Hollow Knight'
+  );
+});
+
+test('pickRowName laat een Steam-key nooit als titel doorgaan', () => {
+  assert.equal(HSG.pickRowName(['ABCDE-12345-FGHIJ', 'Celeste']), 'Celeste');
+  assert.equal(HSG.pickRowName(['ABCDE-12345-FGHIJ-KLMNO']), null);
+});
+
+test('pickRowName negeert datums, bedragen en losse getallen', () => {
+  assert.equal(HSG.pickRowName(['12/03/2026', '$9.99', '3', 'Dead Cells']), 'Dead Cells');
+});
+
+test('pickRowName normaliseert witruimte uit de opmaak', () => {
+  assert.equal(HSG.pickRowName(['\n  Slay the   Spire \t']), 'Slay the Spire');
+});
+
+test('pickRowName geeft null als er niets bruikbaars in de rij staat', () => {
+  assert.equal(HSG.pickRowName([]), null);
+  assert.equal(HSG.pickRowName(['Steam', 'redeem', '  ', 'a']), null);
+});
+
+test('pickRowName weert absurd lange teksten (beschrijvingen, disclaimers)', () => {
+  const lang = 'x'.repeat(200);
+  assert.equal(HSG.pickRowName([lang, 'Braid']), 'Braid');
+});
+
+test('detectPlatform leest het platform uit een icoon-klassenaam', () => {
+  assert.equal(HSG.detectPlatform('hb hb-steam'), 'steam');
+  assert.equal(HSG.detectPlatform('icon icon-gog large'), 'gog');
+  assert.equal(HSG.detectPlatform('platform-epic'), 'epic');
+});
+
+test('detectPlatform geeft null bij onbekend — dat is iets anders dan "geen Steam"', () => {
+  assert.equal(HSG.detectPlatform('hb hb-chevron-left'), null);
+  assert.equal(HSG.detectPlatform(''), null);
+  assert.equal(HSG.detectPlatform(null), null);
+});
