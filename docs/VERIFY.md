@@ -119,7 +119,12 @@ Zorg dat *Automatisch verzenden* **uit** staat.
    - het juiste spel in sectie 1
    - type staat op **key** en de key staat in het veld
    - start- en eindtijd kloppen en zijn niet in het verleden
-   - regio, doelgroep en level zoals ingesteld
+   - doelgroep en level zoals ingesteld
+   - **regio**: meldt Humble uitgesloten landen, dan hoort "region restricted" op
+     *yes* te staan met alle landen aangevinkt behálve die van Humble. De banner
+     noemt de aantallen ("158 landen toegestaan, 95 uitgesloten"). Tel er een paar
+     na: een land uit Humble's lijst moet uit staan, een land dat er niet in staat
+     aan. Meldt Humble niets, dan geldt je eigen vaste instelling.
 5. **Review Giveaway** → controleren → bevestigen
 6. Na de redirect meldt de balk "Giveaway aangemaakt" en gaat het item in het
    zijpaneel op *klaar*

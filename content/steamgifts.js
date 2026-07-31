@@ -159,6 +159,83 @@
     return true;
   }
 
+  /**
+   * De regio-restrictie.
+   *
+   * Humble geeft een verbodslijst (`disallowed_countries`), SteamGifts wil een
+   * toestemmingslijst. Staat "Regio overnemen van Humble" aan, dan keren we die
+   * om en vinken we alles aan behalve de landen waar de key niet werkt. Anders
+   * geldt gewoon je eigen instelling.
+   *
+   * @returns {Promise<string[]>} opmerkingen voor de banner
+   */
+  async function fillRegion(item, settings) {
+    const notes = [];
+    const blocked = (item.disallowedCountries || []).filter(Boolean);
+    const fromHumble = settings.regionFromHumble !== false && blocked.length > 0;
+
+    if (!fromHumble) {
+      if (!selectOption(SG.regionRestricted, settings.regionRestricted ? '1' : '0')) {
+        notes.push('Regio-optie niet gevonden.');
+      }
+      if (settings.regionRestricted) {
+        const list = await HSG.waitForElement(SG.countryList, { timeout: 5000 }).catch(
+          () => null
+        );
+        if (!list) {
+          notes.push('Landenlijst niet gevonden — controleer de regio-instelling.');
+        } else {
+          const result = HSG.syncItemList(list, settings.countryIds || [], 0);
+          if (result.missing.length) {
+            notes.push(`Onbekende landcode(s): ${result.missing.join(', ')}`);
+          }
+        }
+      }
+      if (blocked.length) {
+        notes.push(
+          `Let op: Humble meldt ${blocked.length} landen waar deze key niet werkt, maar "regio overnemen van Humble" staat uit.`
+        );
+      }
+      return notes;
+    }
+
+    if (!selectOption(SG.regionRestricted, '1')) {
+      notes.push('Regio-optie niet gevonden — zet de restrictie zelf aan.');
+    }
+
+    const list = await HSG.waitForElement(SG.countryList, { timeout: 5000 }).catch(
+      () => null
+    );
+    if (!list) {
+      notes.push(
+        `Landenlijst niet gevonden; Humble sluit ${blocked.length} landen uit — stel de regio zelf in.`
+      );
+      return notes;
+    }
+
+    const available = HSG.readItemList(list, 0).map((entry) => entry.id);
+    const { allowed, unknown } = HSG.allowedCountries(available, blocked);
+
+    // Herkent SteamGifts geen enkel land uit Humble's lijst, dan zou "beperken"
+    // hier alles toestaan — dat is misleidender dan geen restrictie.
+    if (allowed.length === available.length) {
+      selectOption(SG.regionRestricted, '0');
+      notes.push(
+        `Humble noemt ${blocked.length} landen, maar SteamGifts kent er daarvan geen. Regio-restrictie uit gelaten — controleer dit zelf.`
+      );
+      return notes;
+    }
+
+    HSG.syncItemList(list, allowed, 0);
+    notes.push(
+      `Regio beperkt volgens Humble: ${allowed.length} landen toegestaan, ${available.length - allowed.length} uitgesloten.`
+    );
+    if (unknown.length) {
+      notes.push(`${unknown.length} landcode(s) van Humble kent SteamGifts niet.`);
+    }
+    return notes;
+  }
+
   async function fillForm(job, resolved) {
     const { item, key, settings } = job;
     const notes = [];
@@ -179,27 +256,7 @@
     if (!fillDate(SG.startTime, schedule.startText)) notes.push('Starttijd niet gevonden.');
     if (!fillDate(SG.endTime, schedule.endText)) notes.push('Eindtijd niet gevonden.');
 
-    // Regio
-    const regionValue = settings.regionRestricted ? '1' : '0';
-    if (!selectOption(SG.regionRestricted, regionValue)) {
-      notes.push('Regio-optie niet gevonden.');
-    }
-    if (settings.regionRestricted) {
-      // De landenlijst wordt pas uitgeklapt nadat de restrictie aan staat.
-      const list = await HSG.waitForElement(SG.countryList, { timeout: 5000 }).catch(
-        () => null
-      );
-      const result = HSG.syncItemList(list, settings.countryIds || [], 0);
-      if (!list) notes.push('Landenlijst niet gevonden — controleer de regio-instelling.');
-      else if (result.missing.length) {
-        notes.push(`Onbekende landcode(s): ${result.missing.join(', ')}`);
-      }
-    }
-    if (item.disallowedCountries && item.disallowedCountries.length) {
-      notes.push(
-        `Humble meldt regiobeperkingen voor dit spel (${item.disallowedCountries.join(', ')}).`
-      );
-    }
+    notes.push(...(await fillRegion(item, settings)));
 
     // Wie mag meedoen
     if (!selectOption(SG.whoCanEnter, settings.whoCanEnter)) {

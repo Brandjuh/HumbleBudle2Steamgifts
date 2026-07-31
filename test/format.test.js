@@ -172,3 +172,41 @@ test('parseOrderKey geeft null als er geen sleutel in staat', () => {
   assert.equal(HSG.parseOrderKey(''), null);
   assert.equal(HSG.parseOrderKey(null), null);
 });
+
+// --- regio: Humble verbiedt, SteamGifts staat toe -----------------------------
+
+test('allowedCountries keert Humbles verbodslijst om', () => {
+  const result = HSG.allowedCountries(['NL', 'BE', 'DE', 'BR', 'JP'], ['BR', 'JP']);
+  assert.deepEqual(result.allowed, ['NL', 'BE', 'DE']);
+  assert.deepEqual(result.blocked, ['BR', 'JP']);
+  assert.deepEqual(result.unknown, []);
+});
+
+test('allowedCountries meldt codes die SteamGifts niet kent', () => {
+  const result = HSG.allowedCountries(['NL', 'BE'], ['BR', 'XX']);
+  assert.deepEqual(result.allowed, ['NL', 'BE']);
+  assert.deepEqual(result.unknown.sort(), ['BR', 'XX']);
+});
+
+test('allowedCountries trekt zich niets aan van hoofdletters en spaties', () => {
+  const result = HSG.allowedCountries(['nl', ' BE '], ['be']);
+  assert.deepEqual(result.allowed, ['nl']);
+  assert.deepEqual(result.blocked, ['BE']);
+});
+
+test('allowedCountries laat alles toe als Humble niets verbiedt', () => {
+  const result = HSG.allowedCountries(['NL', 'BE'], []);
+  assert.deepEqual(result.allowed, ['NL', 'BE']);
+  assert.deepEqual(result.blocked, []);
+});
+
+test('allowedCountries op een echte Humble-lijst houdt Europa over', () => {
+  // Fragment van wat Humble voor zo'n key doorgeeft.
+  const humble = ['BR', 'CN', 'JP', 'KR', 'IN', 'ZA', 'AU', 'NZ', 'MX', 'RU'];
+  const steamgifts = ['NL', 'BE', 'DE', 'FR', 'GB', 'US', 'BR', 'CN', 'JP', 'AU'];
+  const result = HSG.allowedCountries(steamgifts, humble);
+  assert.deepEqual(result.allowed, ['NL', 'BE', 'DE', 'FR', 'GB', 'US']);
+  assert.deepEqual(result.blocked, ['BR', 'CN', 'JP', 'AU']);
+  // KR, IN, ZA, NZ, MX en RU staan niet in de SteamGifts-lijst van deze test.
+  assert.deepEqual(result.unknown.sort(), ['IN', 'KR', 'MX', 'NZ', 'RU', 'ZA']);
+});

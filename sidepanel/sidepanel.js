@@ -445,6 +445,7 @@
         whitelist: form.elements.whitelist.checked,
         groupIds: splitIds(form.elements.groupIds.value),
         contributorLevel: clamp(Number(form.elements.contributorLevel.value) || 0, 0, 10),
+        regionFromHumble: form.elements.regionFromHumble.checked,
         regionRestricted: form.elements.regionRestricted.checked,
         countryIds: splitIds(form.elements.countryIds.value),
         description: form.elements.description.value,
