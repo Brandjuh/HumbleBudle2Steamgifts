@@ -213,25 +213,35 @@
       return notes;
     }
 
-    const available = HSG.readItemList(list, 0).map((entry) => entry.id);
-    const { allowed, unknown } = HSG.allowedCountries(available, blocked);
+    const available = HSG.readItemList(list, 0);
+    const { allowedIds, blockedCodes, unknownCodes, unmapped } = HSG.allowedCountries(
+      available,
+      blocked
+    );
 
-    // Herkent SteamGifts geen enkel land uit Humble's lijst, dan zou "beperken"
-    // hier alles toestaan — dat is misleidender dan geen restrictie.
-    if (allowed.length === available.length) {
+    // Sluit dit niets uit, dan zou "beperken" in de praktijk alles toestaan.
+    // Dat is misleidender dan geen restrictie, dus dan liever uit met een uitleg.
+    if (blockedCodes.length === 0) {
       selectOption(SG.regionRestricted, '0');
       notes.push(
-        `Humble noemt ${blocked.length} landen, maar SteamGifts kent er daarvan geen. Regio-restrictie uit gelaten — controleer dit zelf.`
+        `Humble noemt ${blocked.length} landen, maar geen daarvan komt voor in de landenlijst van SteamGifts. Regio-restrictie uit gelaten — stel dit zelf in.`
       );
       return notes;
     }
 
-    HSG.syncItemList(list, allowed, 0);
+    HSG.syncItemList(list, allowedIds, 0);
     notes.push(
-      `Regio beperkt volgens Humble: ${allowed.length} landen toegestaan, ${available.length - allowed.length} uitgesloten.`
+      `Regio beperkt volgens Humble: ${allowedIds.length} landen toegestaan, ${blockedCodes.length} uitgesloten.`
     );
-    if (unknown.length) {
-      notes.push(`${unknown.length} landcode(s) van Humble kent SteamGifts niet.`);
+    if (unknownCodes.length) {
+      notes.push(
+        `${unknownCodes.length} landcode(s) van Humble kent SteamGifts niet (${unknownCodes.slice(0, 6).join(', ')}).`
+      );
+    }
+    if (unmapped.length) {
+      notes.push(
+        `${unmapped.length} land(en) op SteamGifts zonder leesbare landcode — die staan toegestaan.`
+      );
     }
     return notes;
   }
@@ -266,9 +276,20 @@
       const list = await HSG.waitForElement(SG.groupList, { timeout: 5000 }).catch(
         () => null
       );
-      const whitelist = q(SG.whitelist);
-      if (whitelist) HSG.setNativeValue(whitelist, settings.whitelist ? '1' : '0');
-      // Kind 0 van de groepenlijst is "My Whitelist" en heeft zijn eigen veld.
+      // "My Whitelist" is de eerste rij van de groepenlijst, maar heeft geen
+      // data-item-id: het hoort bij het aparte `whitelist`-veld. Aanklikken in
+      // plaats van het verborgen veld schrijven, zodat de zichtbare staat klopt.
+      const whitelistItem = q(SG.whitelistItem);
+      const whitelistOn = Boolean(settings.whitelist);
+      if (whitelistItem) {
+        if (whitelistItem.classList.contains('is-selected') !== whitelistOn) {
+          HSG.clickWidget(whitelistItem);
+        }
+      } else {
+        const whitelist = q(SG.whitelist);
+        if (whitelist) HSG.setNativeValue(whitelist, whitelistOn ? '1' : '0');
+      }
+
       const result = HSG.syncItemList(list, settings.groupIds || [], 1);
       if (!list) notes.push('Groepenlijst niet gevonden.');
       else if (result.missing.length) {
@@ -531,15 +552,32 @@
       detail: `${rowScoped.length} van 3`,
     });
 
+    // De landcode is de kwetsbare schakel: SteamGifts identificeert landen met
+    // een eigen nummer en zet de ISO-code alleen in `data-name`. Lukt dat
+    // uitlezen niet, dan is Humbles regio-informatie nergens op te leggen.
+    const countries = HSG.readItemList(q(SG.countryList), 0);
+    const withCode = countries.filter((entry) => entry.code);
     checks.push({
-      label: 'Groepen beschikbaar',
+      label: 'Landcodes leesbaar',
+      ok: countries.length > 0 && withCode.length === countries.length,
+      detail: countries.length
+        ? `${withCode.length} van ${countries.length} — bijv. ${withCode
+            .slice(0, 6)
+            .map((entry) => `${entry.code}=${entry.id}`)
+            .join(', ')}`
+        : 'geen landenlijst gevonden',
+    });
+
+    const groups = HSG.readItemList(q(SG.groupList), 0);
+    checks.push({
+      label: `Groepen (${groups.length}) — id's voor de instellingen`,
       ok: true,
-      detail: JSON.stringify(HSG.readItemList(q(SG.groupList), 0).slice(0, 30)),
+      detail: groups.map((entry) => `${entry.id} = ${entry.name}`).join(' · ') || 'geen',
     });
     checks.push({
-      label: 'Landen beschikbaar',
-      ok: true,
-      detail: JSON.stringify(HSG.readItemList(q(SG.countryList), 0).slice(0, 40)),
+      label: 'Whitelist-rij in de groepenlijst',
+      ok: Boolean(q(SG.whitelistItem)),
+      detail: SG.whitelistItem,
     });
 
     return { site: 'steamgifts', checks };

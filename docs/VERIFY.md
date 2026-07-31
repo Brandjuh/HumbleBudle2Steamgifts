@@ -79,8 +79,14 @@ Ziet die er anders uit, dan `humble.keyField`, `rowName` en `rowBundleLink` in
 SteamGifts**. Alle velden moeten ✓ zijn. Een ✕ betekent dat SteamGifts die
 selector heeft gewijzigd → aanpassen in `lib/selectors.js`.
 
-Noteer meteen de **groep-id's en landcodes** onderaan het rapport; die heb je
-nodig als je de giveaway wilt beperken.
+Let vooral op **"Landcodes leesbaar"**: daar horen twee gelijke getallen te staan
+(bijv. "249 van 249") met voorbeelden als `NL=160, BR=30`. SteamGifts
+identificeert landen namelijk met een eigen nummer en zet de ISO-code alleen in
+`data-name`. Lukt dat uitlezen niet, dan valt Humbles regio-informatie nergens op
+te leggen en blijft de restrictie uit.
+
+Onderaan staan de **groep-id's** (nummers, met de groepsnaam erbij) die je nodig
+hebt als je de giveaway tot bepaalde groepen wilt beperken.
 
 ## 3. Catalogus lezen — verandert niets
 
