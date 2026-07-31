@@ -4,6 +4,7 @@
   "private": true,
   "description": "Privé Chrome-extensie die van Humble Choice-keys SteamGifts-giveaways maakt.",
   "scripts": {
+    "build": "node build.js",
     "test": "node --test 'test/*.test.js'"
   }
 }

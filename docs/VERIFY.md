@@ -12,22 +12,17 @@ rij-opbouw eromheen is een heuristiek. **Stap 2 is daarom niet optioneel.**
 
 ## 0. Laden
 
-1. `chrome://extensions` → Developer mode → **Load unpacked** → deze map
-2. Controleer dat er geen fouten op de extensiekaart staan
-3. Klik op het extensie-icoon; het zijpaneel moet openen met "0 in de wachtrij"
+1. Installeer het userscript (zie de README) of, tijdens ontwikkelen, plak de
+   inhoud van `dist/humble-to-steamgifts.user.js` in een nieuw Tampermonkey-script
+2. Open een van de gematchte pagina's; rechtsonder hoort een knop
+   **Humble → SteamGifts** te verschijnen
 
-Waar de logs staan — het zijn drie losse consoles:
+Logs staan gewoon in de console van de pagina zelf — één console, anders dan bij
+de extensieversie. Fouten uit het script worden voorafgegaan door
+`[Humble → SteamGifts]`.
 
-| Onderdeel | Waar |
-|---|---|
-| Service worker | `chrome://extensions` → kaart → link **service worker** |
-| Content script | DevTools op de pagina zelf → Console → contextkiezer bovenaan omzetten naar de extensie |
-| Zijpaneel | rechtsklik in het paneel → **Inspect** |
-
-De service worker-link verdwijnt als de worker slaapt. Dat is normaal. Let op:
-zolang je zijn DevTools open hebt blijft hij leven, wat precies de
-levenscyclus-bugs verbergt die je zoekt — doe minstens één ronde met die
-DevTools dicht.
+Na een wijziging: `npm run build`, dan in Tampermonkey het script bijwerken (of
+tijdens ontwikkelen: het bestand direct plakken) en de pagina verversen.
 
 ## 1. Voorbereiding
 
@@ -168,9 +163,12 @@ binnen twee minuten.
 ## 8. Na wijzigingen aan de code
 
 ```bash
-node --test 'test/*.test.js'
+npm test
+npm run build
 ```
 
-Daarna in `chrome://extensions` de extensie herladen **en de open tabs van beide
-sites verversen** — content scripts worden niet opnieuw in bestaande tabs
-geïnjecteerd, en de oude blijven achter met een ongeldige extensiecontext.
+Daarna het script in Tampermonkey bijwerken en de open tabs verversen.
+
+Vergeet `npm run build` niet vóór je commit: `dist/humble-to-steamgifts.user.js`
+is wat Tampermonkey ophaalt. Zonder die stap wijzigt de bron wel en het
+uitgeleverde script niet — en dan zoek je een fout die je al gerepareerd hebt.
