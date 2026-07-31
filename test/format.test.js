@@ -133,3 +133,42 @@ test('detectPlatform geeft null bij onbekend — dat is iets anders dan "geen St
   assert.equal(HSG.detectPlatform(''), null);
   assert.equal(HSG.detectPlatform(null), null);
 });
+
+test('detectPlatform herkent het icoon zoals Humble het schrijft', () => {
+  // <td class="platform"><i class="hb hb-key hb-steam"></i></td>
+  assert.equal(HSG.detectPlatform('hb hb-key hb-steam'), 'steam');
+});
+
+test('pickRowName kiest de disclaimer niet die in elke key-rij staat', () => {
+  // Deze zin staat in élke rij op /home/keys. Omdat hij langer is dan de meeste
+  // speltitels won hij van de titel, waarna alle rijen dezelfde naam kregen en
+  // de hele lijst tot één regel samenklapte.
+  const disclaimer =
+    'Steam will not provide extra giftable copies of games you already own.';
+  assert.equal(HSG.pickRowName([disclaimer, 'Dicefolk']), 'Dicefolk');
+  assert.equal(HSG.pickRowName([disclaimer]), null);
+});
+
+test('looksLikeProse scheidt volzinnen van speltitels', () => {
+  assert.equal(HSG.looksLikeProse('Steam will not provide extra copies.'), true);
+  assert.equal(HSG.looksLikeProse('S.T.A.L.K.E.R.'), false);
+  assert.equal(HSG.looksLikeProse('Mr. Prepper'), false);
+  assert.equal(HSG.looksLikeProse('Hollow Knight'), false);
+});
+
+test('parseOrderKey haalt de order-sleutel uit een bundellink', () => {
+  assert.equal(
+    HSG.parseOrderKey('/download?key=5UpZdUyMHhmZxuqa'),
+    '5UpZdUyMHhmZxuqa'
+  );
+  assert.equal(
+    HSG.parseOrderKey('https://www.humblebundle.com/downloads?key=AbC123&foo=1'),
+    'AbC123'
+  );
+});
+
+test('parseOrderKey geeft null als er geen sleutel in staat', () => {
+  assert.equal(HSG.parseOrderKey('/home/keys'), null);
+  assert.equal(HSG.parseOrderKey(''), null);
+  assert.equal(HSG.parseOrderKey(null), null);
+});

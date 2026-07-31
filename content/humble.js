@@ -42,14 +42,24 @@
     domNodes: new Map(),
     source: null,
     scanError: null,
-    lastKeyFieldCount: 0,
+    bundles: [],
+    truncatedOrders: 0,
+    /** Orders die we deze sessie al opgehaald hebben; niet nog eens doen. */
+    fetchedOrders: new Set(),
+    /** Verzamelde API-regels, groeit mee terwijl je door Humble bladert. */
+    apiEntries: [],
   };
+
+  /** Zoveel orders halen we hooguit op per scan; daarboven meldt het zijpaneel het. */
+  const MAX_ORDERS_PER_SCAN = 12;
 
   const page = {
     get isKeysPage() {
+      // Humble gebruikt zowel /download?key=… (de bundellink in een key-rij) als
+      // /downloads?key=… — beide dekken met één prefix.
       return (
         location.pathname.startsWith('/home/keys') ||
-        location.pathname.startsWith('/downloads')
+        location.pathname.startsWith('/download')
       );
     },
     get isMembership() {
@@ -116,15 +126,37 @@
   /** Verzamelt de losse teksten in een rij, zonder die van het keyveld zelf. */
   function rowTexts(row, keyField) {
     const texts = [];
-    const named = row.querySelector(H.rowName);
-    if (named && !keyField.contains(named)) texts.push(named.textContent);
-
     for (const el of row.querySelectorAll('*')) {
       if (el.children.length > 0) continue;
       if (keyField.contains(el) || el === keyField) continue;
       texts.push(el.textContent);
     }
     return texts;
+  }
+
+  /**
+   * De spelnaam. Staat er een echt naamelement in de rij (`.game-name h4`), dan
+   * is dat het antwoord — punt. Alleen als dat ontbreekt vallen we terug op de
+   * heuristiek, en die kan ernaast zitten: eerder koos hij de disclaimer die in
+   * elke rij staat, waardoor alle rijen dezelfde naam kregen.
+   */
+  function readRowName(row, keyField) {
+    const named = row.querySelector(H.rowName);
+    if (named && !keyField.contains(named)) {
+      const text = named.textContent.replace(/\s+/g, ' ').trim();
+      if (text) return text;
+    }
+    return HSG.pickRowName(rowTexts(row, keyField));
+  }
+
+  /** De bundel waar deze rij bij hoort, inclusief order-sleutel. */
+  function readRowBundle(row) {
+    const link = row.querySelector(H.rowBundleLink);
+    if (!link) return { gamekey: null, bundleName: null };
+    return {
+      gamekey: HSG.parseOrderKey(link.getAttribute('href')),
+      bundleName: link.textContent.replace(/\s+/g, ' ').trim() || null,
+    };
   }
 
   function rowPlatform(row) {
@@ -141,36 +173,47 @@
    */
   function scanDom() {
     const entries = [];
-    const seen = new Set();
+    const used = new Set();
 
     document.querySelectorAll(H.keyField).forEach((keyField, index) => {
       const row = findRow(keyField);
-      const humanName = HSG.pickRowName(rowTexts(row, keyField));
+      const humanName = readRowName(row, keyField);
       if (!humanName) return;
 
+      const bundle = readRowBundle(row);
       const revealedKey = keyField.classList.contains(H.redeemedClass)
         ? (keyField.getAttribute('title') || '').trim()
         : '';
+      const unavailable =
+        keyField.classList.contains(H.disabledClass) && !revealedKey;
 
       // Zonder machine_name (die komt uit de API) is de genormaliseerde naam de
-      // enige stabiele sleutel. Stabiel is hier belangrijk: onder deze id staat
+      // enige stabiele sleutel. Stabiel is belangrijk: onder deze id staat
       // straks de key in session storage.
       const slug = HSG.normalizeTitle(humanName).replace(/\s+/g, '-') || `rij-${index}`;
-      const id = HSG.itemId(state.gamekey || 'dom', slug);
-      if (seen.has(id)) return;
-      seen.add(id);
+      let id = HSG.itemId(bundle.gamekey || state.gamekey || 'dom', slug);
+
+      // Botsen twee rijen tóch, dan krijgen ze een volgnummer. De tweede stil
+      // laten vallen is precies hoe de lijst eerder tot één regel samenklapte.
+      if (used.has(id)) {
+        let suffix = 2;
+        while (used.has(`${id}-${suffix}`)) suffix += 1;
+        id = `${id}-${suffix}`;
+      }
+      used.add(id);
 
       entries.push({
         id,
         machineName: null,
         humanName,
-        gamekey: state.gamekey || null,
+        gamekey: bundle.gamekey || state.gamekey || null,
         keyindex: null,
         steamAppId: null,
         keyType: rowPlatform(row),
         revealed: Boolean(revealedKey),
+        unavailable,
         disallowedCountries: [],
-        bundleName: null,
+        bundleName: bundle.bundleName,
         fromDom: true,
       });
 
@@ -225,6 +268,7 @@
       steamAppId: HSG.normalizeAppId(tpk.steam_app_id),
       keyType: 'steam',
       revealed: Boolean(tpk.redeemed_key_val),
+      unavailable: false,
       disallowedCountries: tpk.disallowed_countries || [],
       bundleName: (order.product && order.product.human_name) || null,
       fromDom: false,
@@ -239,16 +283,27 @@
    * een spel alleen in de DOM, dan gaat het mee zonder appid.
    */
   function merge(domEntries, apiEntries) {
+    // Twee sleutels: bundel+titel is eenduidig, titel alleen is de terugval voor
+    // rijen waarvan we de order-sleutel niet konden lezen. Zonder de eerste zou
+    // hetzelfde spel uit twee bundels door elkaar kunnen lopen.
+    const byBundleAndName = new Map();
     const byName = new Map();
     for (const entry of apiEntries) {
-      byName.set(HSG.normalizeTitle(entry.humanName), entry);
+      const name = HSG.normalizeTitle(entry.humanName);
+      byBundleAndName.set(`${entry.gamekey}|${name}`, entry);
+      if (!byName.has(name)) byName.set(name, entry);
     }
 
     const merged = [];
     const usedApi = new Set();
 
     for (const domEntry of domEntries) {
-      const match = byName.get(HSG.normalizeTitle(domEntry.humanName));
+      const name = HSG.normalizeTitle(domEntry.humanName);
+      const candidate =
+        (domEntry.gamekey && byBundleAndName.get(`${domEntry.gamekey}|${name}`)) ||
+        byName.get(name);
+      const match = candidate && !usedApi.has(candidate.id) ? candidate : null;
+
       if (!match) {
         merged.push(domEntry);
         continue;
@@ -262,11 +317,17 @@
       if (domKey) state.domKeys.set(match.id, domKey);
       if (node) state.domNodes.set(match.id, node);
 
-      merged.push({ ...match, revealed: match.revealed || domEntry.revealed });
+      merged.push({
+        ...match,
+        revealed: match.revealed || domEntry.revealed,
+        unavailable: domEntry.unavailable,
+        bundleName: domEntry.bundleName || match.bundleName,
+      });
     }
 
-    // API-regels die niet in de DOM staan (bijv. buiten de zichtbare pagina)
-    // horen er ook bij.
+    // API-regels die niet in de DOM staan horen er ook bij. Dat is meteen de
+    // oplossing voor de paginering van Humble: zie je drie rijen van een maand,
+    // dan lever de order alsnog álle keys van die maand.
     for (const entry of apiEntries) {
       if (!usedApi.has(entry.id)) merged.push(entry);
     }
@@ -274,39 +335,71 @@
   }
 
   /**
-   * @param {'page'|'library'} scope `page` = wat op deze pagina staat (snel),
-   *   `library` = alle orders van het account ophalen (traag, honderden spellen).
+   * @param {'page'|'dom'|'library'} scope
+   *   `page`    volledige verse scan van deze pagina
+   *   `dom`     alleen de DOM opnieuw lezen; orders die we al hadden niet nog eens
+   *             ophalen (gebruikt als Humble rijen bijlaadt of je doorbladert)
+   *   `library` alle orders van het account (traag, honderden spellen)
    */
   async function scan(scope) {
     state.scanError = null;
     state.gamekey = readGamekey();
     state.csrf = readCsrfToken();
-    state.domKeys.clear();
     state.domNodes.clear();
 
-    const domEntries = scanDom();
+    if (scope !== 'dom') {
+      state.domKeys.clear();
+      state.apiEntries = [];
+      state.fetchedOrders = new Set();
+      state.truncatedOrders = 0;
+    }
 
-    let apiEntries = [];
+    const domEntries = scanDom();
+    state.bundles = Array.from(
+      new Set(domEntries.map((entry) => entry.bundleName).filter(Boolean))
+    );
+
     let apiError = null;
     try {
       if (scope === 'library') {
-        apiEntries = (await fetchAllOrders()).flatMap(toApiEntries);
-      } else if (state.gamekey) {
-        apiEntries = toApiEntries(await fetchOrder(state.gamekey));
+        state.apiEntries = (await fetchAllOrders()).flatMap(toApiEntries);
+      } else {
+        // Alleen de orders die op deze pagina voorkomen. Dat is doorgaans een
+        // handvol, levert de Steam-appid's, en maakt een maand compleet ongeacht
+        // op welke pagina van Humble je staat.
+        const wanted = new Set(domEntries.map((entry) => entry.gamekey).filter(Boolean));
+        if (state.gamekey) wanted.add(state.gamekey);
+
+        const missing = Array.from(wanted).filter((key) => !state.fetchedOrders.has(key));
+        const room = Math.max(0, MAX_ORDERS_PER_SCAN - state.fetchedOrders.size);
+        const take = missing.slice(0, room);
+        state.truncatedOrders += missing.length - take.length;
+
+        const settled = await Promise.allSettled(take.map(fetchOrder));
+        settled.forEach((result, index) => {
+          state.fetchedOrders.add(take[index]);
+          if (result.status === 'fulfilled') {
+            state.apiEntries.push(...toApiEntries(result.value));
+          } else {
+            apiError = String(
+              (result.reason && result.reason.message) || result.reason
+            );
+          }
+        });
       }
     } catch (error) {
       // Niet fataal: zonder API missen we alleen het appid.
       apiError = String(error.message || error);
     }
 
-    const games = domEntries.length > 0 ? merge(domEntries, apiEntries) : apiEntries;
+    const apiEntries = state.apiEntries;
+    const games = domEntries.length > 0 ? merge(domEntries, apiEntries) : apiEntries.slice();
     if (domEntries.length > 0) state.source = apiEntries.length ? 'dom+api' : 'dom';
     else state.source = apiEntries.length ? 'api' : 'leeg';
 
     games.sort((a, b) => a.humanName.localeCompare(b.humanName, 'nl'));
 
     state.games = games;
-    state.lastKeyFieldCount = document.querySelectorAll(H.keyField).length;
     state.byId = new Map(games.map((game) => [game.id, game]));
     for (const id of Array.from(state.selected)) {
       if (!state.byId.has(id)) state.selected.delete(id);
@@ -324,6 +417,8 @@
       pageUrl: location.href,
       source: state.source,
       keyFieldCount: document.querySelectorAll(H.keyField).length,
+      bundles: state.bundles,
+      truncatedOrders: state.truncatedOrders,
       apiError: state.scanError,
       hasCsrf: Boolean(state.csrf),
     };
@@ -380,7 +475,9 @@
     const existing = (node.getAttribute('title') || '').trim();
     if (existing) return existing;
 
-    HSG.clickWidget(node);
+    // Het klikbare vlak is `.keyfield-value` ("Reveal your Steam key"); zonder
+    // dat vlak het keyveld zelf.
+    HSG.clickWidget(node.querySelector(H.keyFieldValue) || node);
     const value = await HSG.waitForAttribute(node, 'title', { timeout: 15000 });
     const key = String(value || '').trim();
     if (!key) throw new Error('Het keyveld bleef leeg.');
@@ -437,6 +534,9 @@
         let key = cached;
         let didReveal = false;
 
+        if (!key && game.unavailable) {
+          throw new Error('Humble biedt deze key niet meer aan.');
+        }
         if (!key) {
           key =
             game.machineName && game.gamekey
@@ -530,22 +630,40 @@
         detail: `${keyFields.length} gevonden, waarvan ${redeemed.length} al onthuld (${H.keyField})`,
       },
       {
-        label: 'Spelnamen uit de rijen gelezen',
+        // Ongelijke aantallen betekenen dat rijen samenklappen doordat ze
+        // dezelfde naam krijgen — precies de fout die dit eerder tot één regel
+        // terugbracht. Daarom staan beide getallen hier naast elkaar.
+        label: 'Rijen met een leesbare naam',
+        ok: domEntries.length === keyFields.length && domEntries.length > 0,
+        detail: `${domEntries.length} van ${keyFields.length} keyvelden`,
+      },
+      {
+        label: 'Gelezen spelnamen',
         ok: domEntries.length > 0,
         detail:
           domEntries.length > 0
-            ? domEntries
-                .slice(0, 5)
-                .map((entry) => entry.humanName)
-                .join(' · ')
+            ? domEntries.slice(0, 6).map((entry) => entry.humanName).join(' · ')
             : 'geen naam kunnen bepalen — zie de rij-dump hieronder',
       },
       {
-        label: 'Order-sleutel',
+        label: 'Bundels op deze pagina',
+        ok: domEntries.some((entry) => entry.gamekey),
+        detail: (() => {
+          const bundles = Array.from(
+            new Set(domEntries.map((entry) => entry.bundleName).filter(Boolean))
+          );
+          const withKey = domEntries.filter((entry) => entry.gamekey).length;
+          return bundles.length
+            ? `${bundles.length} bundel(s), ${withKey} rijen met order-sleutel — ${bundles.slice(0, 4).join(' · ')}`
+            : 'geen bundellink in de rijen gevonden — dan missen de Steam-appids';
+        })(),
+      },
+      {
+        label: 'Order-sleutel uit de URL',
         ok: Boolean(gamekey),
         detail: gamekey
-          ? 'gevonden in de URL of het paginamodel'
-          : 'niet gevonden — werkt nog, maar zonder Steam-appid uit de API',
+          ? 'gevonden'
+          : 'niet in de URL — op /home/keys normaal; de sleutels komen per rij uit de bundellink',
       },
       {
         label: 'CSRF-token',
@@ -554,19 +672,21 @@
       },
     ];
 
+    const probeKey =
+      gamekey || (domEntries.find((entry) => entry.gamekey) || {}).gamekey || null;
     let apiOk = false;
-    let apiDetail = 'overgeslagen: geen order-sleutel op deze pagina';
+    let apiDetail = 'overgeslagen: geen order-sleutel gevonden op deze pagina';
     try {
-      if (gamekey) {
-        const order = await fetchOrder(gamekey);
+      if (probeKey) {
+        const order = await fetchOrder(probeKey);
         const tpks = (order && order.tpkd_dict && order.tpkd_dict.all_tpks) || [];
         apiOk = true;
-        apiDetail = `${tpks.length} keys in deze order, waarvan ${tpks.filter(HSG.isUsableTpk).length} bruikbare Steam-keys`;
+        apiDetail = `${tpks.length} keys in die order, waarvan ${tpks.filter(HSG.isUsableTpk).length} bruikbare Steam-keys`;
       }
     } catch (error) {
       apiDetail = String(error.message || error);
     }
-    checks.push({ label: 'Humble JSON-API', ok: apiOk || !gamekey, detail: apiDetail });
+    checks.push({ label: 'Humble JSON-API', ok: apiOk || !probeKey, detail: apiDetail });
 
     checks.push({ label: 'Voorbeeldrij (keys weggelaten)', ok: true, detail: sampleRow() });
 
@@ -776,15 +896,10 @@
 
     clearTimeout(rescanTimer);
     rescanTimer = setTimeout(async () => {
-      // Alleen opnieuw scannen als er echt rijen bij of af zijn gekomen
-      // (paginering, "toon meer"). Anders alleen de vinkjes terugzetten —
-      // scannen doet een netwerkverzoek en dat hoeft hier niet.
-      const count = document.querySelectorAll(H.keyField).length;
-      if (count === state.lastKeyFieldCount) {
-        renderUi();
-        return;
-      }
-      await scan('page').catch(() => null);
+      // Bladeren naar een volgende pagina met evenveel rijen verandert het
+      // aantal keyvelden niet, dus daar valt niet op te sturen. De DOM opnieuw
+      // lezen is goedkoop; alleen orders die we nog niet hadden worden opgehaald.
+      await scan('dom').catch(() => null);
       renderUi();
       await publishCatalog();
     }, 600);

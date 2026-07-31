@@ -209,16 +209,26 @@
     );
     const hints = [`${catalog.games.length} spellen gevonden.`];
     if (catalog.pageUrl) hints.push(`Van: ${shortUrl(catalog.pageUrl)}.`);
+    if (catalog.bundles && catalog.bundles.length) {
+      hints.push(`Bundels: ${catalog.bundles.slice(0, 4).join(', ')}.`);
+    }
     if (catalog.source === 'dom') {
       hints.push('Zonder Steam-appid — er wordt op titel gezocht op SteamGifts.');
+    }
+    if (catalog.truncatedOrders) {
+      hints.push(
+        `${catalog.truncatedOrders} bundel(s) niet opgehaald — filter op één bundel of scan opnieuw.`
+      );
     }
     if (catalog.apiError) hints.push(`API-aanvulling mislukt: ${catalog.apiError}`);
     ui.catalogHint.textContent = hints.join(' ');
 
+    // Ook op bundelnaam filteren: zoeken op "July 2026" geeft precies de maand
+    // die je wilt weggeven, ook als die over meerdere Humble-pagina's staat.
     const needle = HSG.normalizeTitle(ui.catalogFilter.value || '');
     const visible = needle
       ? catalog.games.filter((game) =>
-          HSG.normalizeTitle(game.humanName).includes(needle)
+          HSG.normalizeTitle(`${game.humanName} ${game.bundleName || ''}`).includes(needle)
         )
       : catalog.games;
 
@@ -236,7 +246,7 @@
       const input = document.createElement('input');
       input.type = 'checkbox';
       input.checked = local.selected.has(game.id);
-      input.disabled = queued.has(game.id);
+      input.disabled = queued.has(game.id) || Boolean(game.unavailable);
       input.addEventListener('change', () => {
         if (input.checked) local.selected.add(game.id);
         else local.selected.delete(game.id);
@@ -250,6 +260,8 @@
       const tag = document.createElement('span');
       tag.className = 'catalog__tag';
       const tags = [];
+      if (game.bundleName) tags.push(game.bundleName);
+      if (game.unavailable) tags.push('niet meer beschikbaar bij Humble');
       if (queued.has(game.id)) tags.push('staat al in de wachtrij');
       if (game.revealed) tags.push('key al onthuld');
       if (!game.steamAppId) tags.push('geen appid — zoekt op titel');

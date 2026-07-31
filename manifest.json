@@ -41,7 +41,7 @@
         "https://www.humblebundle.com/membership/*",
         "https://www.humblebundle.com/subscription/*",
         "https://www.humblebundle.com/home/keys*",
-        "https://www.humblebundle.com/downloads*"
+        "https://www.humblebundle.com/download*"
       ],
       "js": [
         "lib/shared.js",

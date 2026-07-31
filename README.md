@@ -30,7 +30,8 @@ resulterende publieke sleutel als `"key"` in `manifest.json`.
    de downloadpagina van die bundel (`/downloads?key=…`).
 3. Onderin verschijnt een balk met het aantal gevonden spellen, en elke rij
    krijgt een **Giveaway**-vinkje. Aanvinken kan ook in het tabblad **Humble**
-   van het zijpaneel.
+   van het zijpaneel — daar staat bij elk spel de bundel, en het zoekveld filtert
+   ook daarop. Zoeken op "July 2026" geeft dus precies die maand.
 4. Klik op **Make giveaway**. De keys worden opgehaald en de spellen komen in de
    wachtrij.
 5. Ga naar het tabblad **Wachtrij** en klik op **Start**. Er opent een
@@ -74,11 +75,25 @@ die je in de instellingen nodig hebt.
 
 ## Hoe het werkt
 
-- **De catalogus** komt van de keys-pagina zelf. Elk keyveld ziet er zo uit:
-  `<div class="js-keyfield keyfield redeemed enabled" title="XXXXX-…">` — de key
-  staat in `title`, en `redeemed` betekent dat hij al onthuld is. Staat er een
-  order-sleutel in de URL (`/downloads?key=…`), dan wordt die lijst aangevuld
-  vanuit Humble's JSON-API met `steam_app_id` en `machine_name`.
+- **De catalogus** komt van de keys-pagina zelf. Elke rij ziet er zo uit:
+
+  ```html
+  <tr>
+    <td class="platform"><i class="hb hb-key hb-steam"></i></td>
+    <td class="game-name">
+      <h4>Dicefolk</h4>
+      <p><a href="/download?key=5UpZdUyMHhmZxuqa">July 2026 Humble Choice</a></p>
+    </td>
+    <td class="js-redeemer-cell">…<div class="js-keyfield keyfield redeemed enabled" title="XXXXX-…">…</div></td>
+  </tr>
+  ```
+
+  De key staat in het `title`-attribuut van `.js-keyfield`, `redeemed` betekent
+  dat hij al onthuld is, en de bundellink levert zowel de bundelnaam als de
+  **order-sleutel**. Met die sleutel wordt de order opgehaald voor de
+  `steam_app_id` en `machine_name` — en dat lost meteen Humble's paginering op:
+  zie je één rij van een maand, dan krijg je die maand compleet, ook de spellen
+  die op pagina 2 staan.
 
   Eerder werd dit uit een JSON-blob op de maandpagina gehaald. Die blob staat er
   niet meer, waardoor de scan terugviel op álle orders en de hele bibliotheek

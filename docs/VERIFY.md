@@ -43,19 +43,37 @@ downloadpagina van de bundel (`/downloads?key=…`). Dan in het zijpaneel
 **Diagnose → Humble**. Verwacht:
 
 - ✓ Soort pagina — moet je keys-pagina noemen, niet `/membership/…`
-- ✓ Keyvelden op de pagina — het aantal moet kloppen met wat je op het scherm
-  ziet, inclusief hoeveel er al onthuld zijn
-- ✓ Spelnamen uit de rijen gelezen — de eerste paar titels, ter controle
-- Order-sleutel — ✓ op `/downloads?key=…`; op `/home/keys` mag dit ✕ zijn, dan
-  mist alleen het Steam-appid en wordt er op titel gezocht
+- ✓ Keyvelden op de pagina — het aantal moet kloppen met wat je op het scherm ziet
+- ✓ **Rijen met een leesbare naam** — dit is de belangrijkste regel: hier moeten
+  twee gelijke getallen staan ("15 van 15"). Staat er "1 van 15", dan krijgen alle
+  rijen dezelfde naam en klapt de lijst samen tot één regel — dat is precies de
+  bug die dit ooit onbruikbaar maakte. Oorzaak zit dan in `rowName` in
+  `lib/selectors.js` of in `HSG.pickRowName`.
+- ✓ Gelezen spelnamen — echte titels, geen zin uit een tooltip of disclaimer
+- ✓ Bundels op deze pagina — het aantal bundels en hoeveel rijen een
+  order-sleutel hebben. Zonder sleutel missen de Steam-appid's
+- Order-sleutel uit de URL — ✕ op `/home/keys` is normaal; de sleutels komen daar
+  per rij uit de bundellink
 - ✓ CSRF-token
 
 Bovenaan staat op welke tab het gedraaid heeft. Klopt dat niet, dan had je
 meerdere Humble-tabs open — sluit de andere en probeer opnieuw.
 
-Onderaan staat een voorbeeldrij met de keys eruit gefilterd. Zijn de spelnamen
-leeg of onzinnig, dan heeft Humble de opmaak gewijzigd: `humble.keyField`,
-`rowContainers` en `rowName` in `lib/selectors.js` bijstellen.
+Onderaan staat een voorbeeldrij met de keys eruit gefilterd. Verwacht ongeveer:
+
+```html
+<tr>
+  <td class="platform"><i class="hb hb-key hb-steam"></i></td>
+  <td class="game-name">
+    <h4>Dicefolk</h4>
+    <p><a href="/download?key=…">July 2026 Humble Choice</a></p>
+  </td>
+  <td class="js-redeemer-cell">…<div class="js-keyfield keyfield redeemed enabled">…</div></td>
+</tr>
+```
+
+Ziet die er anders uit, dan `humble.keyField`, `rowName` en `rowBundleLink` in
+`lib/selectors.js` bijstellen.
 
 **SteamGifts:** open `steamgifts.com/giveaways/new`, dan **Diagnose →
 SteamGifts**. Alle velden moeten ✓ zijn. Een ✕ betekent dat SteamGifts die
@@ -71,7 +89,11 @@ Op de keys-pagina:
 - Onderin verschijnt de balk met "N spellen gevonden"
 - Elke rij met een key krijgt een **Giveaway**-vinkje
 - Aanvinken telt mee in de balk en in het zijpaneel
-- In het zijpaneel filtert het zoekveld de lijst (nuttig op `/home/keys`)
+- In het zijpaneel staat bij elk spel de bundelnaam; het zoekveld filtert op
+  titel **en** bundel. Zoeken op "July 2026" moet die hele maand geven —
+  inclusief spellen die op pagina 2 of 3 van Humble staan, want de order wordt
+  in zijn geheel opgehaald zodra één rij van die bundel zichtbaar is
+- Blader naar de volgende pagina van Humble: de lijst in het zijpaneel groeit mee
 
 ## 4. Eén key ophalen
 
