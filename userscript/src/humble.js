@@ -494,11 +494,30 @@
   }
 
   function injectRowCheckboxes() {
+    const placed = new Set();
+
     for (const game of state.games) {
       const keyField = state.domNodes.get(game.id);
-      if (!keyField) continue;
+      // Losgekoppelde nodes overslaan: Humble hertekent rijen, en dan wijst een
+      // eerder vastgelegde verwijzing nergens meer naartoe.
+      if (!keyField || !keyField.isConnected) continue;
       const row = findRow(keyField);
-      if (!row || row.querySelector('.hsg-row-check')) continue;
+      if (!row) continue;
+
+      const existing = row.querySelector('.hsg-row-check');
+      if (existing) {
+        if (existing.dataset.hsgId === game.id) {
+          placed.add(game.id);
+          continue;
+        }
+        // De id van deze rij is veranderd — een DOM-id wordt een API-id zodra de
+        // aanvulling alsnog lukt. Het oude vinkje zou dan een id in de selectie
+        // zetten dat nergens meer bestaat, en "Make giveaway" faalt.
+        if (HSG.panel.selection.delete(existing.dataset.hsgId)) {
+          HSG.panel.selection.add(game.id);
+        }
+        existing.remove();
+      }
 
       const label = document.createElement('label');
       label.className = `hsg-row-check${game.unavailable ? ' is-unavailable' : ''}`;
@@ -517,7 +536,13 @@
       label.addEventListener('click', (event) => event.stopPropagation());
       const host = checkboxHost(row);
       host.insertBefore(label, host.firstChild);
+      placed.add(game.id);
     }
+
+    // Weesvinkjes van spellen die niet meer in de catalogus staan.
+    document.querySelectorAll('.hsg-row-check').forEach((label) => {
+      if (!placed.has(label.dataset.hsgId)) label.remove();
+    });
   }
 
   /** Vinkjes gelijktrekken nadat de selectie elders veranderde. */
@@ -639,7 +664,15 @@
 
       clearTimeout(timer);
       timer = setTimeout(async () => {
-        if (domSignature() === state.scannedSignature) {
+        // De vingerafdruk zegt iets over de inhoud, niet over de identiteit van
+        // de nodes. Hertekent Humble dezelfde rijen — dat gebeurt na het
+        // onthullen van een key — dan blijft de vingerafdruk gelijk terwijl onze
+        // verwijzingen dood zijn, en komt er nooit meer een vinkje in een
+        // levende rij. Daarom eerst kijken of ze nog aan het document hangen.
+        const nodesLive = Array.from(state.domNodes.values()).every(
+          (node) => node.isConnected
+        );
+        if (nodesLive && domSignature() === state.scannedSignature) {
           injectRowCheckboxes();
           syncSelection();
           return;

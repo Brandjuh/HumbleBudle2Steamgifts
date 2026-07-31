@@ -859,12 +859,28 @@
 
   /** Zet een vinkje in elke rij die een key bevat. */
   function injectRowCheckboxes() {
-    let placed = 0;
+    const placed = new Set();
+
     for (const game of state.games) {
       const keyField = state.domNodes.get(game.id);
-      if (!keyField) continue;
+      // Losgekoppelde nodes overslaan: Humble hertekent rijen, en dan wijst een
+      // eerder vastgelegde verwijzing nergens meer naartoe.
+      if (!keyField || !keyField.isConnected) continue;
       const row = findRow(keyField);
-      if (!row || row.querySelector('.hsg-tile-check')) continue;
+      if (!row) continue;
+
+      const existing = row.querySelector('.hsg-tile-check');
+      if (existing) {
+        if (existing.dataset.hsgId === game.id) {
+          placed.add(game.id);
+          continue;
+        }
+        // De id van deze rij is veranderd — een DOM-id wordt een API-id zodra de
+        // aanvulling alsnog lukt. Het oude vinkje zou dan een id in de selectie
+        // zetten dat nergens meer bestaat, en "Make giveaway" faalt.
+        if (state.selected.delete(existing.dataset.hsgId)) state.selected.add(game.id);
+        existing.remove();
+      }
 
       const label = document.createElement('label');
       label.className = 'hsg-tile-check hsg-tile-check--inline';
@@ -887,9 +903,14 @@
       label.addEventListener('click', (event) => event.stopPropagation());
       const host = checkboxHost(row);
       host.insertBefore(label, host.firstChild);
-      placed += 1;
+      placed.add(game.id);
     }
-    return placed;
+
+    // Weesvinkjes van spellen die niet meer in de catalogus staan.
+    document.querySelectorAll('.hsg-tile-check').forEach((label) => {
+      if (!placed.has(label.dataset.hsgId)) label.remove();
+    });
+    return placed.size;
   }
 
   function renderUi() {
@@ -965,7 +986,16 @@
       // Dit onderscheid is niet cosmetisch: elke scan publiceert de catalogus,
       // en elke publicatie liet het zijpaneel zijn lijst hertekenen — precies
       // op het moment dat je daar iets probeerde aan te vinken.
-      if (domSignature() === state.scannedSignature) {
+      //
+      // Maar de vingerafdruk zegt iets over de inhoud, niet over de identiteit
+      // van de nodes. Hertekent Humble dezelfde rijen — dat gebeurt na het
+      // onthullen van een key — dan blijft de vingerafdruk gelijk terwijl onze
+      // verwijzingen dood zijn, en komt er nooit meer een vinkje in een levende
+      // rij. Daarom eerst kijken of ze nog aan het document hangen.
+      const nodesLive = Array.from(state.domNodes.values()).every(
+        (node) => node.isConnected
+      );
+      if (nodesLive && domSignature() === state.scannedSignature) {
         renderUi();
         return;
       }

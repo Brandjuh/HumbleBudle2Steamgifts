@@ -151,6 +151,7 @@ binnen twee minuten.
 
 | Geval | Verwacht |
 |---|---|
+| **Een key onthullen op een rij die nog verborgen was** | Het **Giveaway**-vinkje van die rij blijft staan (Humble hertekent die rij; als het vinkje verdwijnt en niet terugkomt, is de node-controle in de MutationObserver stuk) |
 | Maandpagina openen | Alleen een balkje met "naar mijn keys"; verder wordt daar niets gelezen |
 | `/home/keys` met honderden spellen | Lijst is doorzoekbaar; **Hele bibliotheek** haalt ook orders op die niet op de pagina staan |
 | Spel dat SteamGifts niet kent | Wachtrij pauzeert, status *keuze nodig*, kandidaten in het zijpaneel |
