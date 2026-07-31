@@ -108,11 +108,18 @@ die je in de instellingen nodig hebt.
   voorkeur op Steam appid. Humble levert die niet altijd; dan wordt op titel
   gezocht. Is de match niet eenduidig, dan pauzeert de wachtrij en kies je zelf
   in het zijpaneel — liever één klik extra dan een key aan het verkeerde spel.
-- **De regio** wordt omgekeerd. Humble levert `disallowed_countries` — waar de key
-  níét werkt; SteamGifts wil weten wie er wél mee mag doen. De extensie vinkt dus
-  alle landen aan behalve die van Humble. Kent SteamGifts geen enkele van die
-  landcodes, dan blijft de restrictie uit met een melding erbij: "beperken" tot
-  alles is misleidender dan niet beperken.
+- **De regio** wordt omgekeerd. Op SteamGifts betekent een aangevinkt land "hier
+  mag men meedoen" — het formulier vraagt letterlijk waar de key *kan* worden
+  geactiveerd. Humble zegt het andersom, met twee velden:
+  `disallowed_countries` (hier werkt de key níét) en `exclusive_countries` (de
+  key werkt *alleen* hier). Is die tweede gevuld, dan is die leidend en telt de
+  eerste er nog bovenop.
+
+  Kent SteamGifts geen enkele van die landcodes, dan blijft de restrictie uit met
+  een melding erbij: "beperken" tot alles is misleidender dan niet beperken.
+
+  Staat Nederland aangevinkt, dan is dat dus goed nieuws — Humble blokkeert de
+  key daar niet.
 - **De wachtrij** staat in `chrome.storage.local` en overleeft een
   browserherstart.
 - **De keys** staan uitsluitend in `chrome.storage.session`: alleen in het

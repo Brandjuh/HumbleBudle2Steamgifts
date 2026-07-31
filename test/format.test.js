@@ -239,6 +239,28 @@ test('allowedCountries staat een land zonder leesbare code toe, maar meldt het',
   assert.deepEqual(result.unmapped, ['999']);
 });
 
+test('allowedCountries: exclusive_countries is leidend en sluit de rest uit', () => {
+  // Humbles tweede veld: de key werkt ALLEEN in deze landen. Wie er niet naar
+  // kijkt zet zo'n key open voor de hele wereld.
+  const result = HSG.allowedCountries(sgCountries, [], ['NL', 'BE']);
+  assert.deepEqual(result.allowedIds, ['160', '21']);
+  assert.deepEqual(result.blockedCodes.sort(), ['BR', 'DE', 'JP']);
+});
+
+test('allowedCountries telt disallowed bovenop exclusive', () => {
+  const result = HSG.allowedCountries(sgCountries, ['BE'], ['NL', 'BE', 'DE']);
+  assert.deepEqual(result.allowedIds, ['160', '86']);
+  assert.ok(result.blockedCodes.includes('BE'));
+});
+
+test('allowedCountries laat een land zonder code vallen bij een exclusieve key', () => {
+  // Zonder leesbare code kunnen we niet vaststellen dát het bij de exclusieve
+  // lijst hoort, dus dan valt hij af in plaats van er stilletjes bij te komen.
+  const items = [{ id: '999', code: null }, { id: '160', code: 'NL' }];
+  assert.deepEqual(HSG.allowedCountries(items, [], ['NL']).allowedIds, ['160']);
+  assert.deepEqual(HSG.allowedCountries(items, ['BR']).allowedIds, ['999', '160']);
+});
+
 test('allowedCountries op een echte Humble-lijst houdt Europa en de VS over', () => {
   const humble = ['BR', 'CN', 'JP', 'KR', 'IN', 'ZA', 'AU', 'NZ', 'MX', 'RU'];
   const steamgifts = [

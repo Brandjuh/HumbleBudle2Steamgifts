@@ -50,6 +50,7 @@ test('makeItem heeft precies de velden die de wachtrij mag bevatten', () => {
     'candidates',
     'disallowedCountries',
     'error',
+    'exclusiveCountries',
     'gamekey', // de order-id bij Humble, geen Steam-key
     'giveawayUrl',
     'humanName',

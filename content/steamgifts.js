@@ -172,7 +172,9 @@
   async function fillRegion(item, settings) {
     const notes = [];
     const blocked = (item.disallowedCountries || []).filter(Boolean);
-    const fromHumble = settings.regionFromHumble !== false && blocked.length > 0;
+    const exclusive = (item.exclusiveCountries || []).filter(Boolean);
+    const fromHumble =
+      settings.regionFromHumble !== false && (blocked.length > 0 || exclusive.length > 0);
 
     if (!fromHumble) {
       if (!selectOption(SG.regionRestricted, settings.regionRestricted ? '1' : '0')) {
@@ -216,7 +218,8 @@
     const available = HSG.readItemList(list, 0);
     const { allowedIds, blockedCodes, unknownCodes, unmapped } = HSG.allowedCountries(
       available,
-      blocked
+      blocked,
+      exclusive
     );
 
     // Sluit dit niets uit, dan zou "beperken" in de praktijk alles toestaan.
@@ -224,14 +227,16 @@
     if (blockedCodes.length === 0) {
       selectOption(SG.regionRestricted, '0');
       notes.push(
-        `Humble noemt ${blocked.length} landen, maar geen daarvan komt voor in de landenlijst van SteamGifts. Regio-restrictie uit gelaten — stel dit zelf in.`
+        `Humble noemt ${blocked.length + exclusive.length} landen, maar geen daarvan komt voor in de landenlijst van SteamGifts. Regio-restrictie uit gelaten — stel dit zelf in.`
       );
       return notes;
     }
 
     HSG.syncItemList(list, allowedIds, 0);
     notes.push(
-      `Regio beperkt volgens Humble: ${allowedIds.length} landen toegestaan, ${blockedCodes.length} uitgesloten.`
+      exclusive.length
+        ? `Humble geeft deze key alleen vrij in ${exclusive.length} landen; ${allowedIds.length} daarvan staan aangevinkt (aangevinkt = mag meedoen).`
+        : `Regio overgenomen van Humble: ${allowedIds.length} landen aangevinkt en dus toegestaan, ${blockedCodes.length} uitgezet omdat de key daar niet werkt.`
     );
     if (unknownCodes.length) {
       notes.push(

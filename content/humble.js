@@ -217,6 +217,7 @@
         revealed: Boolean(revealedKey),
         unavailable,
         disallowedCountries: [],
+        exclusiveCountries: [],
         bundleName: bundle.bundleName,
         fromDom: true,
       });
@@ -274,6 +275,7 @@
       revealed: Boolean(tpk.redeemed_key_val),
       unavailable: false,
       disallowedCountries: tpk.disallowed_countries || [],
+      exclusiveCountries: tpk.exclusive_countries || [],
       bundleName: (order.product && order.product.human_name) || null,
       fromDom: false,
     }));
@@ -562,6 +564,7 @@
         keyindex: game.keyindex != null ? game.keyindex : 0,
         steamAppId: game.steamAppId,
         disallowedCountries: game.disallowedCountries || [],
+        exclusiveCountries: game.exclusiveCountries || [],
       };
       try {
         const cached = state.domKeys.get(game.id) || known.get(game.id) || null;
