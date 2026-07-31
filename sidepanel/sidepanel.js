@@ -23,7 +23,7 @@
     diagnostics: document.querySelector('[data-role="diagnostics"]'),
   };
 
-  const local = { selected: new Set() };
+  const local = { selected: new Set(), catalogSignature: null };
   let state = null;
 
   const splitIds = (value) => String(value || '').trim().split(/\s+/).filter(Boolean);
@@ -189,10 +189,11 @@
   }
 
   function renderCatalog() {
-    ui.catalog.textContent = '';
     const catalog = state.catalog;
 
     if (!catalog || !catalog.games || catalog.games.length === 0) {
+      ui.catalog.textContent = '';
+      local.catalogSignature = 'leeg';
       ui.catalogHint.textContent =
         'Nog geen catalogus. Open je Humble keys-pagina (/home/keys of de downloadpagina van de bundel) en klik op "Deze pagina scannen".';
       updateAddButton();
@@ -232,6 +233,31 @@
         )
       : catalog.games;
 
+    // Niet hertekenen als er niets veranderd is. Dit paneel ververst op elke
+    // storage-wijziging, en de Humble-tab schrijft daar geregeld naartoe — het
+    // vinkje waar je net op mikte werd dan onder je muis vervangen.
+    const signature = [
+      catalog.pageUrl,
+      catalog.source,
+      needle,
+      visible.length,
+      visible
+        .map(
+          (game) =>
+            `${game.id}${game.revealed ? 'r' : ''}${game.unavailable ? 'u' : ''}${
+              queued.has(game.id) ? 'q' : ''
+            }`
+        )
+        .join(','),
+    ].join('|');
+
+    if (signature === local.catalogSignature) {
+      updateAddButton();
+      return;
+    }
+    local.catalogSignature = signature;
+    ui.catalog.textContent = '';
+
     if (visible.length === 0) {
       const li = document.createElement('li');
       li.className = 'empty';
@@ -239,12 +265,14 @@
       ui.catalog.append(li);
     }
 
-    for (const game of visible) {
+    visible.forEach((game, index) => {
       const li = document.createElement('li');
       li.className = 'catalog__item';
 
       const input = document.createElement('input');
       input.type = 'checkbox';
+      // Zonder id/for is alleen het minuscule vakje aanklikbaar.
+      input.id = `catalog-item-${index}`;
       input.checked = local.selected.has(game.id);
       input.disabled = queued.has(game.id) || Boolean(game.unavailable);
       input.addEventListener('change', () => {
@@ -255,6 +283,7 @@
 
       const label = document.createElement('label');
       label.className = 'catalog__label';
+      label.htmlFor = input.id;
       label.textContent = game.humanName;
 
       const tag = document.createElement('span');
@@ -273,7 +302,7 @@
 
       li.append(input, label);
       ui.catalog.append(li);
-    }
+    });
     updateAddButton();
   }
 
@@ -403,6 +432,11 @@
     'add-selected': async () => {
       const ids = Array.from(local.selected);
       if (ids.length === 0) return;
+      // Onthullen is bij Humble niet terug te draaien; bij een grote selectie
+      // eerst even vragen.
+      if (ids.length > 25 && !confirm(`${ids.length} keys ophalen bij Humble. Doorgaan?`)) {
+        return;
+      }
       showNotice(`Keys ophalen voor ${ids.length} ${ids.length === 1 ? 'spel' : 'spellen'}…`, 'ok');
       const result = await call({ type: MSG.QUEUE_ADD, ids });
       local.selected.clear();
@@ -466,9 +500,13 @@
 
   // De service worker kan zonder ons de wachtrij bijwerken (bijv. wanneer een
   // giveaway is aangemaakt), dus meeluisteren op storage in plaats van pollen.
+  let refreshTimer = null;
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local' && area !== 'session') return;
-    refresh().catch(() => {});
+    // Bundelen: één wachtrij-actie kan meerdere schrijfacties opleveren, en
+    // hertekenen tijdens een klik kost je die klik.
+    clearTimeout(refreshTimer);
+    refreshTimer = setTimeout(() => refresh().catch(() => {}), 250);
   });
 
   refresh().catch((error) => showNotice(String(error.message || error), 'error'));

@@ -48,6 +48,10 @@
     fetchedOrders: new Set(),
     /** Verzamelde API-regels, groeit mee terwijl je door Humble bladert. */
     apiEntries: [],
+    /** Laatst gepubliceerde vingerafdruk; voorkomt overbodige storage-schrijfacties. */
+    publishedSignature: null,
+    /** Vingerafdruk van de DOM bij de laatste scan. */
+    scannedSignature: null,
   };
 
   /** Zoveel orders halen we hooguit op per scan; daarboven meldt het zijpaneel het. */
@@ -400,6 +404,7 @@
     games.sort((a, b) => a.humanName.localeCompare(b.humanName, 'nl'));
 
     state.games = games;
+    state.scannedSignature = domSignature();
     state.byId = new Map(games.map((game) => [game.id, game]));
     for (const id of Array.from(state.selected)) {
       if (!state.byId.has(id)) state.selected.delete(id);
@@ -424,8 +429,30 @@
     };
   }
 
-  function publishCatalog() {
-    return send({ type: MSG.HUMBLE_CATALOG, catalog: catalogPayload() });
+  /**
+   * Goedkope vingerafdruk van wat er op de pagina staat. Wordt gebruikt om
+   * nutteloos werk te vermijden: elke publicatie naar storage wekt het
+   * zijpaneel, en dat hertekende dan zijn lijst terwijl je aan het aanvinken
+   * was.
+   */
+  function domSignature() {
+    const fields = document.querySelectorAll(H.keyField);
+    if (fields.length === 0) return '0';
+    const first = fields[0];
+    const last = fields[fields.length - 1];
+    return [
+      fields.length,
+      readRowName(findRow(first), first) || '',
+      readRowName(findRow(last), last) || '',
+    ].join('|');
+  }
+
+  function publishCatalog(force) {
+    const payload = catalogPayload();
+    const signature = `${payload.games.length}|${payload.source}|${domSignature()}`;
+    if (!force && signature === state.publishedSignature) return Promise.resolve(null);
+    state.publishedSignature = signature;
+    return send({ type: MSG.HUMBLE_CATALOG, catalog: payload });
   }
 
   // --- keys onthullen ----------------------------------------------------------
@@ -490,13 +517,20 @@
    */
   async function revealKeys(ids, delayMs) {
     // Het zijpaneel werkt op een catalogus uit storage; dit script kan intussen
-    // herladen zijn. Dan is state leeg en zouden we stil niets doen.
+    // herladen zijn of naar een andere pagina gebladerd. Dan is state leeg of
+    // verouderd en zouden we stil niets doen.
     if (state.byId.size === 0) await scan('page');
 
-    const wanted = ids.map((id) => state.byId.get(id)).filter(Boolean);
+    let wanted = ids.map((id) => state.byId.get(id)).filter(Boolean);
+    if (wanted.length === 0) {
+      // Eén keer verse scan proberen voor we het opgeven: de catalogus in het
+      // zijpaneel kan van een vorige pagina komen.
+      await scan('page');
+      wanted = ids.map((id) => state.byId.get(id)).filter(Boolean);
+    }
     if (wanted.length === 0) {
       throw new Error(
-        'Deze spellen staan niet op deze pagina. Open je keys-pagina en scan opnieuw.'
+        `Deze ${ids.length === 1 ? 'key staat' : 'keys staan'} niet op deze pagina. Ga naar de Humble-pagina waar ze staan en klik op "Deze pagina scannen".`
       );
     }
 
@@ -572,16 +606,18 @@
 
     const run = async () => {
       switch (message.type) {
+        // Expliciet gevraagd, dus altijd publiceren — ook als er niets veranderd
+        // is; anders lijkt "Opnieuw scannen" niets te doen.
         case MSG.HUMBLE_SCAN: {
           await scan(message.scope === 'library' ? 'library' : 'page');
           renderUi();
-          await publishCatalog();
+          await publishCatalog(true);
           return { catalog: catalogPayload() };
         }
         case MSG.HUMBLE_REVEAL: {
           const results = await revealKeys(message.ids || [], message.delayMs);
           renderUi();
-          await publishCatalog();
+          await publishCatalog(true);
           return { results };
         }
         default:
@@ -738,7 +774,12 @@
     if (!action) return;
 
     if (action.dataset.action === 'all') {
-      state.games.forEach((game) => state.selected.add(game.id));
+      // Alleen wat op deze pagina staat. state.games bevat ook regels uit de
+      // order die hier niet getoond worden; die allemaal aanvinken zou zomaar
+      // honderden keys onthullen.
+      for (const game of state.games) {
+        if (state.domNodes.has(game.id) && !game.unavailable) state.selected.add(game.id);
+      }
       renderUi();
       return;
     }
@@ -751,6 +792,11 @@
       const ids = Array.from(state.selected);
       if (ids.length === 0) {
         setStatus('Vink eerst een spel aan.');
+        return;
+      }
+      // Onthullen kost je bij Humble de gift-link-optie en is niet terug te
+      // draaien. Bij een grote selectie eerst even vragen.
+      if (ids.length > 25 && !confirm(`${ids.length} keys ophalen bij Humble. Doorgaan?`)) {
         return;
       }
       setBusy(true);
@@ -792,12 +838,20 @@
   }
 
   /**
-   * Een <label> rechtstreeks in een <tr> hangen is ongeldige HTML — de browser
-   * schuift 'm dan buiten de tabel. In een tabelrij gaat hij dus in de eerste cel.
+   * Waar het vinkje in de rij komt te hangen.
+   *
+   * Een <label> rechtstreeks in een <tr> is ongeldige HTML — de browser schuift
+   * hem dan buiten de tabel. Het gaat dus in een cel, en bij voorkeur in de
+   * naamcel: de eerste cel bevat alleen het platform-icoontje en is zo smal dat
+   * het vinkje daar makkelijk buiten beeld valt.
    */
   function checkboxHost(row) {
-    if (row.tagName === 'TR') return row.querySelector('td, th') || row;
-    return row;
+    if (row.tagName !== 'TR') return row;
+    return (
+      row.querySelector('.game-name') ||
+      row.querySelector('td, th') ||
+      row
+    );
   }
 
   /** Zet een vinkje in elke rij die een key bevat. */
@@ -853,8 +907,13 @@
         selected > 1 ? `Make ${selected} giveaways` : 'Make giveaway';
       addButton.disabled = selected === 0;
     }
+    // Het aantal aanvinkbare rijen erbij: is dat 0 terwijl er wel spellen
+    // gevonden zijn, dan lukt het injecteren van de vinkjes niet en moet je het
+    // zijpaneel gebruiken. Zonder dat getal is dat niet te zien.
+    const onPage = document.querySelectorAll('.hsg-tile-check').length;
     setStatus(
-      `${state.games.length} ${state.games.length === 1 ? 'spel' : 'spellen'} gevonden · ${selected} geselecteerd`
+      `${state.games.length} ${state.games.length === 1 ? 'spel' : 'spellen'} · ` +
+        `${onPage} aanvinkbaar op deze pagina · ${selected} geselecteerd`
     );
   }
 
@@ -896,9 +955,17 @@
 
     clearTimeout(rescanTimer);
     rescanTimer = setTimeout(async () => {
-      // Bladeren naar een volgende pagina met evenveel rijen verandert het
-      // aantal keyvelden niet, dus daar valt niet op te sturen. De DOM opnieuw
-      // lezen is goedkoop; alleen orders die we nog niet hadden worden opgehaald.
+      // Alleen echt opnieuw scannen als de rijen veranderd zijn (bladeren,
+      // bijladen). Anders hooguit de vinkjes terugzetten die Humble bij een
+      // herteken kwijtraakte.
+      //
+      // Dit onderscheid is niet cosmetisch: elke scan publiceert de catalogus,
+      // en elke publicatie liet het zijpaneel zijn lijst hertekenen — precies
+      // op het moment dat je daar iets probeerde aan te vinken.
+      if (domSignature() === state.scannedSignature) {
+        renderUi();
+        return;
+      }
       await scan('dom').catch(() => null);
       renderUi();
       await publishCatalog();
