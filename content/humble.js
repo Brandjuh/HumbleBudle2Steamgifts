@@ -218,6 +218,7 @@
         unavailable,
         disallowedCountries: [],
         exclusiveCountries: [],
+        expiry: null,
         bundleName: bundle.bundleName,
         fromDom: true,
       });
@@ -276,6 +277,7 @@
       unavailable: false,
       disallowedCountries: tpk.disallowed_countries || [],
       exclusiveCountries: tpk.exclusive_countries || [],
+      expiry: HSG.storeExpiry(HSG.deadlineFromTpk(tpk)),
       bundleName: (order.product && order.product.human_name) || null,
       fromDom: false,
     }));
@@ -565,6 +567,7 @@
         steamAppId: game.steamAppId,
         disallowedCountries: game.disallowedCountries || [],
         exclusiveCountries: game.exclusiveCountries || [],
+        expiry: game.expiry || null,
       };
       try {
         const cached = state.domKeys.get(game.id) || known.get(game.id) || null;

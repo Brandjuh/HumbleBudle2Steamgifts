@@ -279,3 +279,145 @@ test('allowedCountries op een echte Humble-lijst houdt Europa en de VS over', ()
   // KR, IN, ZA, NZ, MX en RU zitten niet in deze (ingekorte) SteamGifts-lijst.
   assert.deepEqual(result.unknownCodes.sort(), ['IN', 'KR', 'MX', 'NZ', 'RU', 'ZA']);
 });
+
+// --- uiterste inwisseldatum ---------------------------------------------------
+
+test('parseExpiry leest een kale datum als UTC-middernacht', () => {
+  // Het hoofdgeval: Humble levert meestal "YYYY-MM-DD" zonder tijd.
+  const parsed = HSG.parseExpiry('2026-08-15');
+  assert.equal(parsed.dateOnly, true);
+  assert.equal(parsed.date.toISOString(), '2026-08-15T00:00:00.000Z');
+});
+
+test('parseExpiry leest een datetime zonder offset als UTC, niet als lokale tijd', () => {
+  // Kaal new Date('2026-08-15T18:30:00') zou lokale tijd geven — een dag verschil
+  // is dan zomaar mogelijk.
+  const parsed = HSG.parseExpiry('2026-08-15T18:30:00');
+  assert.equal(parsed.dateOnly, false);
+  assert.equal(parsed.date.toISOString(), '2026-08-15T18:30:00.000Z');
+});
+
+test('parseExpiry vertrouwt een expliciete offset', () => {
+  assert.equal(HSG.parseExpiry('2026-08-15T18:30:00Z').date.toISOString(), '2026-08-15T18:30:00.000Z');
+  assert.equal(HSG.parseExpiry('2026-08-15T20:30:00+02:00').date.toISOString(), '2026-08-15T18:30:00.000Z');
+});
+
+test('parseExpiry geeft null bij onbruikbare invoer — liever geen deadline dan een verkeerde', () => {
+  assert.equal(HSG.parseExpiry('binnenkort'), null);
+  assert.equal(HSG.parseExpiry(''), null);
+  assert.equal(HSG.parseExpiry(null), null);
+  assert.equal(HSG.parseExpiry(undefined), null);
+});
+
+test('safeDeadline rekent naar Pacific-middernacht, ook over de zomertijdgrens', () => {
+  // Humble zet keys op wisselende momenten gedurende de expiratiedag uit, in
+  // Pacific-tijd; veilig is het begin van die dag daar.
+  assert.equal(
+    HSG.safeDeadline(HSG.parseExpiry('2026-08-15')).toISOString(),
+    '2026-08-15T07:00:00.000Z' // PDT, UTC-7
+  );
+  assert.equal(
+    HSG.safeDeadline(HSG.parseExpiry('2026-01-15')).toISOString(),
+    '2026-01-15T08:00:00.000Z' // PST, UTC-8
+  );
+});
+
+test('safeDeadline laat een exact moment ongemoeid', () => {
+  const parsed = HSG.parseExpiry('2026-08-15T18:30:00Z');
+  assert.equal(HSG.safeDeadline(parsed).toISOString(), '2026-08-15T18:30:00.000Z');
+  assert.equal(HSG.safeDeadline(null), null);
+});
+
+const NOW = new Date('2026-08-01T12:00:00Z');
+const schedule = (days, deadline) =>
+  HSG.computeSchedule({ startOffsetMinutes: 5, durationDays: days }, NOW, deadline);
+
+test('computeSchedule laat de looptijd met rust als er geen deadline is', () => {
+  const result = schedule(7, undefined);
+  assert.equal(result.cappedBy, null);
+  assert.equal(result.impossible, false);
+  assert.equal(result.end.toISOString(), '2026-08-08T12:05:00.000Z');
+});
+
+test('computeSchedule grijpt niet in bij een ruime deadline', () => {
+  const result = schedule(7, new Date('2026-12-01T00:00:00Z'));
+  assert.equal(result.cappedBy, null);
+  assert.equal(result.end.toISOString(), '2026-08-08T12:05:00.000Z');
+});
+
+test('computeSchedule eindigt een week voor de deadline', () => {
+  const result = schedule(7, new Date('2026-08-11T00:00:00Z'));
+  assert.equal(result.cappedBy, 'deadline');
+  assert.equal(result.impossible, false);
+  assert.equal(result.end.toISOString(), '2026-08-04T00:00:00.000Z');
+});
+
+test('computeSchedule valt terug op één uur als die week niet past', () => {
+  const result = schedule(7, new Date('2026-08-04T00:00:00Z'));
+  assert.equal(result.cappedBy, 'minimum');
+  assert.equal(result.impossible, false);
+  assert.equal(result.end.getTime() - result.start.getTime(), 3600000);
+});
+
+test('computeSchedule meldt onmogelijk als zelfs dat uur niet meer past', () => {
+  assert.equal(schedule(7, new Date('2026-08-01T12:30:00Z')).impossible, true);
+  assert.equal(schedule(7, new Date('2026-07-01T00:00:00Z')).impossible, true);
+});
+
+test('computeSchedule respecteert de 30-dagengrens van SteamGifts', () => {
+  const result = schedule(60, undefined);
+  assert.equal(result.cappedBy, 'maxRange');
+  assert.equal(result.end.toISOString(), '2026-08-31T12:00:00.000Z');
+});
+
+test('deadlineFromTpk gebruikt expiry_date als die er is', () => {
+  const result = HSG.deadlineFromTpk({ expiry_date: '2026-08-15' });
+  assert.equal(result.source, 'field');
+  assert.equal(result.date.toISOString(), '2026-08-15T00:00:00.000Z');
+});
+
+test('deadlineFromTpk vist een datum uit de instructietekst als expiry_date ontbreekt', () => {
+  const result = HSG.deadlineFromTpk({
+    custom_instructions_html: '<p>This key <strong>must be redeemed by August 15, 2026</strong>.</p>',
+  });
+  assert.equal(result.source, 'derived');
+  assert.equal(result.date.toISOString(), '2026-08-15T00:00:00.000Z');
+});
+
+test('deadlineFromTpk pikt géén losse datum op die niets met inwisselen te maken heeft', () => {
+  // Zonder signaalwoord zou een release- of aanbiedingsdatum als deadline gelden,
+  // en een verzonnen deadline is erger dan geen.
+  assert.equal(
+    HSG.deadlineFromTpk({ custom_instructions_html: '<p>Available since June 1, 2026.</p>' }),
+    null
+  );
+  assert.equal(HSG.deadlineFromTpk({}), null);
+  assert.equal(HSG.deadlineFromTpk(null), null);
+});
+
+test('deadlineFromTpk kijkt ook naar instructions_html', () => {
+  const result = HSG.deadlineFromTpk({
+    instructions_html: 'Key expires on March 3, 2027.',
+  });
+  assert.equal(result.date.toISOString(), '2027-03-03T00:00:00.000Z');
+});
+
+test('describeDeadline levert een Engelse regel, met slag om de arm bij een afgeleide datum', () => {
+  const hard = HSG.describeDeadline({ date: new Date(Date.UTC(2026, 7, 15)), dateOnly: true, source: 'field' });
+  assert.match(hard, /expires 15 August 2026 \(Pacific time\)/);
+
+  const soft = HSG.describeDeadline({ date: new Date(Date.UTC(2026, 7, 15)), dateOnly: true, source: 'derived' });
+  assert.match(soft, /appears to expire around/);
+
+  assert.equal(HSG.describeDeadline(null), '');
+});
+
+test('storeExpiry en readExpiry overleven de reis door JSON', () => {
+  const parsed = HSG.deadlineFromTpk({ expiry_date: '2026-08-15' });
+  const stored = JSON.parse(JSON.stringify(HSG.storeExpiry(parsed)));
+  const back = HSG.readExpiry(stored);
+  assert.equal(back.date.toISOString(), parsed.date.toISOString());
+  assert.equal(back.dateOnly, true);
+  assert.equal(back.source, 'field');
+  assert.equal(HSG.readExpiry(null), null);
+});

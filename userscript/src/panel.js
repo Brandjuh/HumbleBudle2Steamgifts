@@ -387,6 +387,11 @@
 
       const tags = [];
       if (game.bundleName) tags.push(game.bundleName);
+      const expiry = HSG.readExpiry(game.expiry);
+      if (expiry) {
+        const days = HSG.daysUntil(HSG.safeDeadline(expiry));
+        tags.push(days <= 0 ? 'verlopen' : `verloopt over ${days} dag${days === 1 ? '' : 'en'}`);
+      }
       if (game.unavailable) tags.push('niet meer beschikbaar bij Humble');
       if (queued.has(game.id)) tags.push('staat al in de wachtrij');
       if (game.revealed) tags.push('key al onthuld');

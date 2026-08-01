@@ -222,9 +222,25 @@
     const copies = q(SG.copies);
     if (copies) HSG.setNativeValue(copies, String(settings.copies || 1));
 
-    const schedule = HSG.computeSchedule(settings, new Date());
+    // De uiterste inwisseldatum is een harde bovengrens: een giveaway die later
+    // eindigt levert de winnaar een dode key.
+    const expiry = HSG.readExpiry(item.expiry);
+    const schedule = HSG.computeSchedule(settings, new Date(), HSG.safeDeadline(expiry));
+
+    if (schedule.impossible) {
+      throw new Error(
+        `Deze key verloopt te snel (${HSG.describeDeadline(expiry)}) — er past geen giveaway van een uur meer voor.`
+      );
+    }
     if (!fillDate(SG.startTime, schedule.startText)) notes.push('Starttijd niet gevonden.');
     if (!fillDate(SG.endTime, schedule.endText)) notes.push('Eindtijd niet gevonden.');
+    if (schedule.cappedBy === 'deadline') {
+      notes.push('Looptijd ingekort tot een week voor de key verloopt.');
+    } else if (schedule.cappedBy === 'minimum') {
+      notes.push('De key verloopt bijna: giveaway staat op het minimum van 1 uur.');
+    } else if (schedule.cappedBy === 'maxRange') {
+      notes.push('Looptijd ingekort tot de 30 dagen die SteamGifts toestaat.');
+    }
 
     notes.push(...(await fillRegion(item, settings)));
 
@@ -252,8 +268,16 @@
 
     fillLevel(Number(settings.contributorLevel) || 0);
 
+    // De deadline hoort in de beschrijving: de winnaar moet weten waar hij aan toe is.
     const description = q(SG.description);
-    if (description) HSG.setNativeValue(description, settings.description || '');
+    if (description) {
+      const warning = HSG.describeDeadline(expiry);
+      const own = settings.description || '';
+      HSG.setNativeValue(
+        description,
+        warning ? [warning, own].filter(Boolean).join('\n\n') : own
+      );
+    }
 
     // De key als laatste: een halverwege afgebroken vulronde laat dan geen key
     // in een verder leeg formulier achter.

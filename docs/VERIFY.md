@@ -121,6 +121,11 @@ Zorg dat *Automatisch verzenden* **uit** staat.
    - type staat op **key** en de key staat in het veld
    - start- en eindtijd kloppen en zijn niet in het verleden
    - doelgroep en level zoals ingesteld
+   - **uiterste inwisseldatum**: heeft het spel er een, dan hoort de eindtijd
+     uiterlijk een week daarvóór te liggen, staat de reden in de banner, en begint
+     de beschrijving met de Engelse waarschuwingsregel. Heb je geen key met
+     deadline bij de hand, dan is dit pad alleen door `npm test` gedekt — daar
+     staan alle randgevallen in (week past niet, uur past niet, verleden tijd)
    - **regio**: let op de betekenis — **aangevinkt = mag meedoen**, niet
      "geblokkeerd". Meldt Humble uitgesloten landen, dan hoort "region restricted"
      op *yes* te staan met alle landen aangevinkt behálve die van Humble. De

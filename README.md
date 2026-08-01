@@ -105,6 +105,27 @@ leesbaar"**, plus de groep-id's die je in de instellingen nodig hebt.
   Staat Nederland aangevinkt, dan is dat dus goed nieuws — Humble blokkeert de key
   daar niet.
 
+### Keys met een uiterste inwisseldatum
+
+Sommige Humble-keys moeten vóór een bepaalde datum op Steam ingewisseld worden.
+Het script leest die datum (`expiry_date`; ontbreekt die, dan wordt de
+instructietekst gelezen, maar alleen als er echt "must be redeemed by" of iets
+dergelijks vlak voor de datum staat) en past de giveaway erop aan:
+
+- de giveaway eindigt **uiterlijk een week vóór** de key verloopt, zodat de
+  winnaar tijd heeft om in te wisselen;
+- past die week niet meer, dan loopt de giveaway **1 uur**;
+- past zelfs dat niet meer, dan wordt het spel **overgeslagen** met de reden
+  erbij — de rest van de wachtrij gaat gewoon door;
+- de deadline komt in het Engels boven aan de **beschrijving** te staan.
+
+De datum is meestal een kale datum zonder tijd, en Humble zet keys op wisselende
+momenten gedurende die dag uit — in Pacific-tijd. Er wordt daarom gerekend vanaf
+het begin van die dag daar, niet vanaf het eind.
+
+Meteen afgedwongen: SteamGifts eist zelf minimaal 1 uur open en start én eind
+binnen 30 dagen. Een langere looptijd wordt afgekapt in plaats van stil geweigerd.
+
 ### Over de keys
 
 Tampermonkey bewaart opgeslagen waarden **op schijf**; er is geen tegenhanger van
@@ -119,7 +140,7 @@ De wachtrij zelf bevat nooit een key — alleen namen, appids en statussen.
 ## Ontwikkelen
 
 ```bash
-npm test     # 58 tests, geen dependencies
+npm test     # 76 tests, geen dependencies
 npm run build   # bouwt dist/humble-to-steamgifts.user.js
 ```
 
