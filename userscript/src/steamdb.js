@@ -544,7 +544,12 @@
         const job = openJobs.find((entry) => !entry.done);
 
         if (!job) {
-          HSG.store.setSteamdbJobs({ ...(record || { jobs: [] }), status: 'done' });
+          // Afmelden gebeurt met hartslag op nul: een toevoeging die nét in
+          // ons vensterken valt ziet dan geen "levende werker" meer en opent
+          // gewoon een vers tabblad in plaats van op ons te wachten.
+          const latest = HSG.store.getSteamdbJobs() || { jobs: [] };
+          if ((latest.jobs || []).some((entry) => !entry.done)) continue;
+          HSG.store.setSteamdbJobs({ ...latest, status: 'done', workerId: null, heartbeatAt: 0 });
           // Kwam er tijdens het afronden nét een taak bij, pak die dan alsnog
           // op in plaats van hem als wees achter te laten.
           const recheck = HSG.store.getSteamdbJobs();

@@ -18,6 +18,7 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_listValues
 // @grant        GM_addValueChangeListener
 // @grant        GM_addStyle
 // @grant        GM_openInTab
@@ -1526,13 +1527,25 @@
     SECRETS: 'secrets',
     STEAMDB_CACHE: 'steamdbCache',
     STEAMDB_JOBS: 'steamdbJobs',
-    STEAMDB_RESULTS: 'steamdbResults',
   };
+
+  /**
+   * Elke regio-uitspraak krijgt een eigen sleutel. Eén gedeelde map zou twee
+   * schrijvers hebben (de Humble-tab en het werktabblad), en lees-wijzig-
+   * schrijf zonder slot verliest dan af en toe een uitspraak.
+   */
+  const STEAMDB_RESULT_PREFIX = 'steamdbResult:';
 
   /** Hoe lang SteamDB-pakketdata houdbaar is. Restricties wijzigen zelden. */
   const STEAMDB_TTL_OK_MS = 14 * 24 * 3600 * 1000;
   /** Negatieve of verouderde uitkomsten korter bewaren: die kunnen bijtrekken. */
   const STEAMDB_TTL_BAD_MS = 24 * 3600 * 1000;
+  /**
+   * Versie van de parser die het cache-item schreef. Vóór versie 2 was er geen
+   * pagina-bewijs, dus een tussenpagina kon als "geen beperking" in de cache
+   * staan — die oude items mogen na een update niet meer meetellen.
+   */
+  const STEAMDB_PARSER_VERSION = 2;
 
   const read = (name, fallback) => {
     try {
@@ -1553,6 +1566,7 @@
    */
   const freshSteamdbEntry = (entry) => {
     if (!entry || !entry.fetchedAt) return null;
+    if (entry.v !== STEAMDB_PARSER_VERSION) return null;
     const solid = entry.status === 'ok' && !entry.stale && !entry.noPackages;
     const ttl = solid ? STEAMDB_TTL_OK_MS : STEAMDB_TTL_BAD_MS;
     return Date.now() - entry.fetchedAt < ttl ? entry : null;
@@ -1676,7 +1690,7 @@
     putSteamdbSub(subId, entry) {
       const cache = read(KEYS.STEAMDB_CACHE, {});
       cache.subs = cache.subs || {};
-      cache.subs[String(subId)] = { ...entry, fetchedAt: Date.now() };
+      cache.subs[String(subId)] = { ...entry, fetchedAt: Date.now(), v: STEAMDB_PARSER_VERSION };
       write(KEYS.STEAMDB_CACHE, cache);
     },
 
@@ -1688,7 +1702,7 @@
     putSteamdbApp(appId, entry) {
       const cache = read(KEYS.STEAMDB_CACHE, {});
       cache.apps = cache.apps || {};
-      cache.apps[String(appId)] = { ...entry, fetchedAt: Date.now() };
+      cache.apps[String(appId)] = { ...entry, fetchedAt: Date.now(), v: STEAMDB_PARSER_VERSION };
       write(KEYS.STEAMDB_CACHE, cache);
     },
 
@@ -1714,35 +1728,38 @@
     },
 
     /**
-     * De regio-uitspraken per wachtrij-item, apart van de wachtrij zelf. Het
-     * werktabblad schrijft hier; de wachtrij wordt alleen door de Humble- en
-     * SteamGifts-tabs beschreven. Zouden ze allebei in de wachtrij schrijven,
-     * dan kan het werktabblad een net gezette status (ingevuld/klaar)
-     * terugdraaien — lees-wijzig-schrijf zonder slot.
+     * De regio-uitspraken per wachtrij-item, apart van de wachtrij zelf én
+     * elk onder een eigen sleutel. Het werktabblad schrijft hier; de wachtrij
+     * wordt alleen door de Humble- en SteamGifts-tabs beschreven. Doordat
+     * elke uitspraak zijn eigen sleutel heeft, kunnen twee tabs elkaars
+     * schrijfacties niet overschrijven — er is geen gedeelde map om te
+     * verliezen.
      */
     getSteamdbResult(itemId) {
-      return read(KEYS.STEAMDB_RESULTS, {})[itemId] || null;
+      return read(STEAMDB_RESULT_PREFIX + itemId, null);
     },
 
     putSteamdbResult(itemId, result) {
-      const results = read(KEYS.STEAMDB_RESULTS, {});
-      results[itemId] = result;
-      write(KEYS.STEAMDB_RESULTS, results);
+      write(STEAMDB_RESULT_PREFIX + itemId, result);
+    },
+
+    steamdbResultKeys() {
+      if (typeof GM_listValues !== 'function') return [];
+      return GM_listValues().filter((name) => name.startsWith(STEAMDB_RESULT_PREFIX));
     },
 
     /** Uitspraken opruimen van items die niet meer in de wachtrij staan. */
     pruneSteamdbResults(validIds) {
-      const keep = new Set(validIds || []);
-      const results = read(KEYS.STEAMDB_RESULTS, {});
-      const pruned = {};
-      for (const [id, value] of Object.entries(results)) {
-        if (keep.has(id)) pruned[id] = value;
+      if (typeof GM_deleteValue !== 'function') return;
+      const keep = new Set((validIds || []).map((id) => STEAMDB_RESULT_PREFIX + id));
+      for (const name of store.steamdbResultKeys()) {
+        if (!keep.has(name)) GM_deleteValue(name);
       }
-      write(KEYS.STEAMDB_RESULTS, pruned);
     },
 
     clearSteamdbResults() {
-      write(KEYS.STEAMDB_RESULTS, {});
+      if (typeof GM_deleteValue !== 'function') return;
+      for (const name of store.steamdbResultKeys()) GM_deleteValue(name);
     },
 
     // --- meeluisteren ---------------------------------------------------------
@@ -2567,7 +2584,12 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
         const job = openJobs.find((entry) => !entry.done);
 
         if (!job) {
-          HSG.store.setSteamdbJobs({ ...(record || { jobs: [] }), status: 'done' });
+          // Afmelden gebeurt met hartslag op nul: een toevoeging die nét in
+          // ons vensterken valt ziet dan geen "levende werker" meer en opent
+          // gewoon een vers tabblad in plaats van op ons te wachten.
+          const latest = HSG.store.getSteamdbJobs() || { jobs: [] };
+          if ((latest.jobs || []).some((entry) => !entry.done)) continue;
+          HSG.store.setSteamdbJobs({ ...latest, status: 'done', workerId: null, heartbeatAt: 0 });
           // Kwam er tijdens het afronden nét een taak bij, pak die dan alsnog
           // op in plaats van hem als wees achter te laten.
           const recheck = HSG.store.getSteamdbJobs();
@@ -2897,8 +2919,10 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     // schuift de wachtrij op terwijl dit paneel op Humble openstaat.
     HSG.store.onChange(HSG.store.NAMES.QUEUE, () => render());
     HSG.store.onChange(HSG.store.NAMES.CATALOG, () => render());
+    // De regio-uitspraken staan elk onder een eigen sleutel; meeluisteren kan
+    // daar niet op. Elke uitspraak wordt echter gevolgd door een schrijf op
+    // het takenrecord (markJobDone), dus dít signaal volstaat om te verversen.
     HSG.store.onChange(HSG.store.NAMES.STEAMDB_JOBS, () => render());
-    HSG.store.onChange(HSG.store.NAMES.STEAMDB_RESULTS, () => render());
 
     render();
     return ui;

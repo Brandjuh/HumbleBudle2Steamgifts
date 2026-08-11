@@ -212,8 +212,10 @@
     // schuift de wachtrij op terwijl dit paneel op Humble openstaat.
     HSG.store.onChange(HSG.store.NAMES.QUEUE, () => render());
     HSG.store.onChange(HSG.store.NAMES.CATALOG, () => render());
+    // De regio-uitspraken staan elk onder een eigen sleutel; meeluisteren kan
+    // daar niet op. Elke uitspraak wordt echter gevolgd door een schrijf op
+    // het takenrecord (markJobDone), dus dít signaal volstaat om te verversen.
     HSG.store.onChange(HSG.store.NAMES.STEAMDB_JOBS, () => render());
-    HSG.store.onChange(HSG.store.NAMES.STEAMDB_RESULTS, () => render());
 
     render();
     return ui;
