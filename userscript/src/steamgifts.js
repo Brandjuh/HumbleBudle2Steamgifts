@@ -129,46 +129,54 @@
   }
 
   /**
-   * De regio. Op SteamGifts betekent aangevinkt "mag meedoen"; Humble zegt het
-   * omgekeerd met `disallowed_countries`, en met `exclusive_countries` zelfs
-   * "alleen hier". Zie HSG.allowedCountries.
+   * De regio. Op SteamGifts betekent aangevinkt "mag meedoen". Welke bron dat
+   * bepaalt beslist `HSG.regionPlan`: verse SteamDB-pakketdata is leidend,
+   * daarna Humble's `disallowed_countries`/`exclusive_countries`, daarna je
+   * vaste instelling. Zie HSG.allowedCountries voor de omkering.
    */
   async function fillRegion(item, settings) {
-    const notes = [];
-    const blocked = (item.disallowedCountries || []).filter(Boolean);
-    const exclusive = (item.exclusiveCountries || []).filter(Boolean);
-    const fromHumble =
-      settings.regionFromHumble !== false && (blocked.length > 0 || exclusive.length > 0);
+    const plan = HSG.regionPlan(item, settings);
+    const notes = plan.notes.slice();
 
-    if (!fromHumble) {
-      if (!selectOption(SG.regionRestricted, settings.regionRestricted ? '1' : '0')) {
+    if (plan.mode === 'off' || plan.mode === 'none') {
+      if (!selectOption(SG.regionRestricted, '0')) notes.push('Regio-optie niet gevonden.');
+      return notes;
+    }
+
+    if (plan.mode === 'fixed') {
+      if (!selectOption(SG.regionRestricted, '1')) {
         notes.push('Regio-optie niet gevonden.');
+        return notes;
       }
-      if (settings.regionRestricted) {
-        const list = await HSG.waitForElement(SG.countryList, { timeout: 5000 }).catch(() => null);
-        if (!list) notes.push('Landenlijst niet gevonden.');
-        else {
-          const byCode = new Map(
-            HSG.readItemList(list, 0)
-              .filter((entry) => entry.code)
-              .map((entry) => [entry.code.toUpperCase(), entry.id])
-          );
-          const wanted = (settings.countryIds || [])
-            .map((code) => byCode.get(String(code).toUpperCase()))
-            .filter(Boolean);
-          HSG.syncItemList(list, wanted, 0);
-          if (wanted.length !== (settings.countryIds || []).length) {
-            notes.push('Niet alle landcodes uit je instellingen zijn herkend.');
-          }
-        }
+      const list = await HSG.waitForElement(SG.countryList, { timeout: 5000 }).catch(() => null);
+      if (!list) {
+        notes.push('Landenlijst niet gevonden.');
+        return notes;
       }
-      if (blocked.length || exclusive.length) {
-        notes.push(
-          `Let op: Humble heeft regio-informatie voor dit spel, maar "regio overnemen van Humble" staat uit.`
-        );
+      const byCode = new Map(
+        HSG.readItemList(list, 0)
+          .filter((entry) => entry.code)
+          .map((entry) => [entry.code.toUpperCase(), entry.id])
+      );
+      const wanted = (settings.countryIds || [])
+        .map((code) => byCode.get(String(code).toUpperCase()))
+        .filter(Boolean);
+      HSG.syncItemList(list, wanted, 0);
+      if (wanted.length !== (settings.countryIds || []).length) {
+        notes.push('Niet alle landcodes uit je instellingen zijn herkend.');
       }
       return notes;
     }
+
+    // 'steamdb' of 'humble': de bronlijsten omkeren naar de toestemmingslijst.
+    const source =
+      plan.mode === 'steamdb'
+        ? `SteamDB${
+            item.steamdb && (item.steamdb.subIds || []).length
+              ? ` (pakket ${item.steamdb.subIds.join(', ')})`
+              : ''
+          }`
+        : 'Humble';
 
     if (!selectOption(SG.regionRestricted, '1')) {
       notes.push('Regio-optie niet gevonden — zet de restrictie zelf aan.');
@@ -183,8 +191,8 @@
     const available = HSG.readItemList(list, 0);
     const { allowedIds, blockedCodes, unknownCodes, unmapped } = HSG.allowedCountries(
       available,
-      blocked,
-      exclusive
+      plan.disallowed,
+      plan.exclusive || []
     );
 
     // Sluit dit niets uit, dan zou "beperken" alles toestaan — misleidender dan
@@ -192,16 +200,16 @@
     if (blockedCodes.length === 0) {
       selectOption(SG.regionRestricted, '0');
       notes.push(
-        `Humble noemt ${blocked.length + exclusive.length} landen, maar geen daarvan komt voor in de lijst van SteamGifts. Regio-restrictie uit gelaten — stel dit zelf in.`
+        `${source} noemt landen, maar geen daarvan komt voor in de lijst van SteamGifts. Regio-restrictie uit gelaten — stel dit zelf in.`
       );
       return notes;
     }
 
     HSG.syncItemList(list, allowedIds, 0);
     notes.push(
-      exclusive.length
-        ? `Humble geeft deze key alleen vrij in ${exclusive.length} landen; ${allowedIds.length} daarvan staan aangevinkt (aangevinkt = mag meedoen).`
-        : `Regio overgenomen van Humble: ${allowedIds.length} landen aangevinkt en dus toegestaan, ${blockedCodes.length} uitgezet.`
+      plan.exclusive && plan.exclusive.length
+        ? `${source}: deze key werkt alleen in ${plan.exclusive.length} landen; ${allowedIds.length} daarvan staan aangevinkt (aangevinkt = mag meedoen).`
+        : `Regio overgenomen van ${source}: ${allowedIds.length} landen aangevinkt en dus toegestaan, ${blockedCodes.length} uitgezet.`
     );
     if (unknownCodes.length) {
       notes.push(`${unknownCodes.length} landcode(s) kent SteamGifts niet (${unknownCodes.slice(0, 6).join(', ')}).`);
@@ -210,6 +218,26 @@
       notes.push(`${unmapped.length} land(en) zonder leesbare landcode.`);
     }
     return notes;
+  }
+
+  /**
+   * De SteamDB-regiocontrole draait in een ander tabblad en kan nog bezig zijn
+   * als dit formulier al opent. Even wachten is beter dan invullen met data
+   * die tien seconden later alsnog binnenkomt.
+   */
+  async function waitForSteamdb(item, settings) {
+    if (settings.steamdbRegion === false) return item;
+    let current = item;
+    for (let round = 0; round < 10; round += 1) {
+      if (!current.steamdb || current.steamdb.status !== 'pending') break;
+      if (round === 0) {
+        HSG.panel.notice(`${item.humanName} — wachten op de SteamDB-regiocontrole…`, 'ok');
+      }
+      await HSG.sleep(2000);
+      const queue = HSG.store.getQueue();
+      current = queue.items.find((entry) => entry.id === item.id) || current;
+    }
+    return current;
   }
 
   async function fillForm(item, key, settings, resolved) {
@@ -385,7 +413,8 @@
 
     let notes;
     try {
-      notes = await fillForm(item, key, settings, resolved.match);
+      const freshItem = await waitForSteamdb(item, settings);
+      notes = await fillForm(freshItem, key, settings, resolved.match);
     } catch (error) {
       fail(item.id, String(error.message || error));
       return;

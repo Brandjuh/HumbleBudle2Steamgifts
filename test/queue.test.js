@@ -62,6 +62,8 @@ test('makeItem heeft precies de velden die de wachtrij mag bevatten', () => {
     'sgGameName',
     'status',
     'steamAppId',
+    'steamPackageId',
+    'steamdb', // de regio-uitspraak van SteamDB — landcodes, nooit een key
   ]);
   assert.equal(item.status, STATUS.PENDING);
 });

@@ -105,6 +105,11 @@ leespad.
 1. Aanvinken → **Make giveaway**
 2. Het spel verschijnt in de wachtrij met status *wacht*
 3. Er staat géén "geen key meer opgeslagen" bij
+4. Staat *Regio via SteamDB controleren* aan, dan opent kort een
+   achtergrondtabblad op steamdb.info; in de wachtrij staat even
+   "SteamDB-controle bezig…" en daarna de uitkomst ("regio via SteamDB: …").
+   Het tabblad hoort zichzelf te sluiten. Blijft de melding hangen, kijk dan of
+   dat tabblad een Cloudflare-controle toont — oplossen en **Opnieuw proberen**
 
 Werkt dat, doe dan hetzelfde met een spel waarvan de key nog verborgen is. Dit is
 de eerste onomkeerbare stap: de key wordt bij Humble definitief onthuld.
@@ -127,11 +132,13 @@ Zorg dat *Automatisch verzenden* **uit** staat.
      deadline bij de hand, dan is dit pad alleen door `npm test` gedekt — daar
      staan alle randgevallen in (week past niet, uur past niet, verleden tijd)
    - **regio**: let op de betekenis — **aangevinkt = mag meedoen**, niet
-     "geblokkeerd". Meldt Humble uitgesloten landen, dan hoort "region restricted"
-     op *yes* te staan met alle landen aangevinkt behálve die van Humble. De
-     banner noemt de aantallen. Tel er twee na: een land uit Humble's lijst (bijv.
-     BR) moet **uit** staan, een land dat er niet in staat (NL) **aan**. Meldt
-     Humble niets, dan geldt je eigen vaste instelling.
+     "geblokkeerd". De banner noemt de bron: **SteamDB (pakket …)** als de
+     pakketdata gelezen kon worden — die is leidend — en anders **Humble**.
+     Tel er twee na: een land uit de bronlijst (bijv. RU) moet **uit** staan,
+     een land dat er niet in staat (NL) **aan**. Meldt SteamDB "geen
+     beperking" terwijl Humble wél landen noemde, dan hoort de restrictie
+     gewoon **uit** te staan, met het verschil in de banner. Meldt geen van
+     beide iets, dan geldt je eigen vaste instelling.
 5. **Review Giveaway** → controleren → bevestigen
 6. Na de redirect meldt de balk "Giveaway aangemaakt" en gaat het item in het
    zijpaneel op *klaar*
@@ -163,6 +170,9 @@ binnen twee minuten.
 | Meerdere kandidaten (bijv. een spel met edities) | Idem; na het kiezen gaat de wachtrij door |
 | SteamGifts-tab tussentijds sluiten | **Start** opent een nieuwe tab op het juiste item |
 | Browser herstarten met een halve wachtrij | Wachtrij staat er nog, items melden "geen key meer opgeslagen"; opnieuw toevoegen vanaf Humble haalt ze terug |
+| SteamDB-tabblad sluiten terwijl de controle loopt | Wachtrij blijft "SteamDB-controle bezig…" melden; opnieuw toevoegen of **Opnieuw proberen** opent een nieuw werktabblad. Het formulier wacht hooguit ~20 s en vult daarna met Humble-gegevens |
+| Cloudflare-controle op steamdb.info | Wachtrij meldt het met een **Opnieuw proberen**-knop; ook gewoon zelf steamdb.info openen werkt — het script biedt daar aan de controles af te maken |
+| Zelfde spel nogmaals toevoegen | Geen nieuw SteamDB-bezoek: de uitkomst komt uit de cache (twee weken houdbaar) |
 | Extensie herladen tijdens een wachtrij | Idem — `storage.session` wordt bij elke herlaad geleegd |
 | Automatisch verzenden aan | Aftelling met **Annuleren**; annuleren laat het formulier ingevuld staan |
 

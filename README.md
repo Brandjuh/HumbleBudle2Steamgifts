@@ -60,8 +60,9 @@ leesbaar"**, plus de groep-id's die je in de instellingen nodig hebt.
 | Start over / looptijd | Bepaalt start- en eindtijd. Eronder staat wat dat nú zou worden. |
 | Wie mag meedoen | Iedereen, op uitnodiging, of groepen. Bij groepen vul je de id's uit de diagnose in. |
 | Contributor level | 0 t/m 10. |
-| Regio overnemen van Humble | Standaard aan. Humble geeft per spel door waar de key niet werkt; de giveaway wordt dan beperkt tot de landen waar hij wél werkt. |
-| Vaste regio-restrictie | Wordt gebruikt als Humble niets meldt of als het overnemen uit staat. |
+| Regio automatisch overnemen | Standaard aan. De giveaway wordt beperkt tot de landen waar de key wél werkt. |
+| Regio via SteamDB controleren | Standaard aan. Leest de pakketdata op steamdb.info — die is leidend boven wat Humble meldt. Zie hieronder. |
+| Vaste regio-restrictie | Wordt gebruikt als geen enkele bron iets meldt of als het overnemen uit staat. |
 | Aantal kopieën | Meestal 1: we geven losse keys weg. |
 | Beschrijving | Optionele vaste tekst onder elke giveaway. |
 | Automatisch verzenden | Uit by default. |
@@ -102,8 +103,44 @@ leesbaar"**, plus de groep-id's die je in de instellingen nodig hebt.
   `disallowed_countries` (hier werkt de key níét) en `exclusive_countries` (de key
   werkt *alleen* hier). Is die tweede gevuld, dan is die leidend.
 
-  Staat Nederland aangevinkt, dan is dat dus goed nieuws — Humble blokkeert de key
-  daar niet.
+  Staat Nederland aangevinkt, dan is dat dus goed nieuws — de key wordt daar
+  niet geblokkeerd.
+
+### Regiocontrole via SteamDB
+
+Humble's regiomeldingen zijn geregeld te ruim of juist onvolledig. De echte
+waarheid staat aan het Steam-pakket (de *sub*) waar de key bij hoort, en SteamDB
+toont die pakketdata. Daarom controleert het script de regio dáár, en is die
+uitkomst **leidend**:
+
+- meldt SteamDB beperkingen, dan gelden die — ook als Humble niets zei;
+- meldt SteamDB (vers) *geen* beperkingen terwijl Humble wel landen noemt, dan
+  gaat de giveaway gewoon wereldwijd open; het verschil staat in de banner;
+- heeft SteamDB niets bruikbaars (pakket onbekend, data verouderd, meerdere
+  pakketten die elkaar tegenspreken), dan gelden Humble's gegevens — en meldt
+  geen van beide iets, je vaste instelling.
+
+**Hoe het pakket gevonden wordt.** Humble's order-API geeft vaak direct het
+pakketnummer mee (`steam_package_id`); dan is er niets te raden. Ontbreekt dat,
+dan wordt de pakketlijst van het spel bekeken: een pakket met "Humble" in de
+naam wint, en bij meerdere kandidaten wordt SteamDB alleen gevolgd als alle
+kandidaten hetzelfde zeggen. Anders zou een wereldwijde key opgesloten kunnen
+raken in de regio van een lokale winkelvariant — dan liever Humble's gegevens,
+met een melding erbij.
+
+**Hoe er gelezen wordt.** SteamDB heeft geen API en staat scrapen niet toe.
+Het script leest daarom in je eigen browser: bij het toevoegen aan de wachtrij
+opent kort een achtergrondtabblad op steamdb.info dat de benodigde pagina's één
+voor één bekijkt — rustig, met pauzes, en elke pagina verdwijnt voor twee weken
+in een cache zodat niets dubbel geladen wordt. Het tabblad sluit zichzelf.
+Vraagt Cloudflare om een controle, dan meldt de wachtrij dat: los de check op
+in dat tabblad (of open steamdb.info zelf) en klik op **Opnieuw proberen**.
+
+De uitkomst staat per spel in de wachtrij ("regio via SteamDB: 16 landen
+geblokkeerd"). Is de controle nog bezig wanneer het formulier al opent, dan
+wacht dat heel even; daarna vult het gewoon met wat er wél is.
+
+Alleen de userscript-versie doet dit — de oude extensie niet.
 
 ### Keys met een uiterste inwisseldatum
 

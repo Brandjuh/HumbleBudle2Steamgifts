@@ -10,6 +10,7 @@
     try {
       if (location.host === 'www.humblebundle.com') HSG.humble.boot();
       else if (location.host === 'www.steamgifts.com') HSG.steamgifts.boot();
+      else if (/(^|\.)steamdb\.info$/.test(location.host)) HSG.steamdb.boot();
     } catch (error) {
       console.error('[Humble → SteamGifts]', HSG.redact(String(error && error.stack) || error));
     }

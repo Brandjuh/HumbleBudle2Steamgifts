@@ -19,7 +19,14 @@
     QUEUE: 'queue',
     CATALOG: 'catalog',
     SECRETS: 'secrets',
+    STEAMDB_CACHE: 'steamdbCache',
+    STEAMDB_JOBS: 'steamdbJobs',
   };
+
+  /** Hoe lang SteamDB-pakketdata houdbaar is. Restricties wijzigen zelden. */
+  const STEAMDB_TTL_OK_MS = 14 * 24 * 3600 * 1000;
+  /** Negatieve of verouderde uitkomsten korter bewaren: die kunnen bijtrekken. */
+  const STEAMDB_TTL_BAD_MS = 24 * 3600 * 1000;
 
   const read = (name, fallback) => {
     try {
@@ -32,6 +39,13 @@
   };
 
   const write = (name, value) => GM_setValue(name, JSON.stringify(value));
+
+  /** Een cache-item alleen teruggeven zolang het houdbaar is. */
+  const freshSteamdbEntry = (entry) => {
+    if (!entry || !entry.fetchedAt) return null;
+    const ttl = entry.status === 'ok' ? STEAMDB_TTL_OK_MS : STEAMDB_TTL_BAD_MS;
+    return Date.now() - entry.fetchedAt < ttl ? entry : null;
+  };
 
   const store = {
     // --- instellingen ---------------------------------------------------------
@@ -135,6 +149,57 @@
 
     clearKeys() {
       write(KEYS.SECRETS, {});
+    },
+
+    // --- SteamDB-cache --------------------------------------------------------
+
+    /**
+     * Pakketdata van SteamDB, gesleuteld op subid/appid. Vers genoeg = niet
+     * opnieuw ophalen; zo blijft het aantal paginaweergaven minimaal.
+     */
+    readSteamdbSub(subId) {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      return freshSteamdbEntry((cache.subs || {})[String(subId)]);
+    },
+
+    putSteamdbSub(subId, entry) {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      cache.subs = cache.subs || {};
+      cache.subs[String(subId)] = { ...entry, fetchedAt: Date.now() };
+      write(KEYS.STEAMDB_CACHE, cache);
+    },
+
+    readSteamdbApp(appId) {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      return freshSteamdbEntry((cache.apps || {})[String(appId)]);
+    },
+
+    putSteamdbApp(appId, entry) {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      cache.apps = cache.apps || {};
+      cache.apps[String(appId)] = { ...entry, fetchedAt: Date.now() };
+      write(KEYS.STEAMDB_CACHE, cache);
+    },
+
+    steamdbCacheStats() {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      return {
+        subs: Object.keys(cache.subs || {}).length,
+        apps: Object.keys(cache.apps || {}).length,
+      };
+    },
+
+    clearSteamdbCache() {
+      write(KEYS.STEAMDB_CACHE, {});
+    },
+
+    /** Het takenlijstje voor het SteamDB-werktabblad. */
+    getSteamdbJobs() {
+      return read(KEYS.STEAMDB_JOBS, null);
+    },
+
+    setSteamdbJobs(record) {
+      write(KEYS.STEAMDB_JOBS, record ? { ...record, updatedAt: Date.now() } : null);
     },
 
     // --- meeluisteren ---------------------------------------------------------

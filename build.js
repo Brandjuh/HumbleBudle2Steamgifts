@@ -33,6 +33,7 @@ const SOURCES = [
   'lib/queue.js',
   'userscript/src/store.js',
   'userscript/src/styles.js',
+  'userscript/src/steamdb.js',
   'userscript/src/panel.js',
   'userscript/src/humble.js',
   'userscript/src/steamgifts.js',

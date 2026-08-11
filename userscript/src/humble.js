@@ -173,6 +173,7 @@
         gamekey: bundle.gamekey || state.gamekey || null,
         keyindex: null,
         steamAppId: null,
+        steamPackageId: null,
         keyType: rowPlatform(row),
         revealed: Boolean(revealedKey),
         unavailable,
@@ -228,6 +229,10 @@
       gamekey,
       keyindex: tpk.keyindex != null ? tpk.keyindex : 0,
       steamAppId: HSG.normalizeAppId(tpk.steam_app_id),
+      // Het Steam-pakket (de "sub") waar deze key bij hoort. Niet altijd
+      // aanwezig, maar als hij er is weet de SteamDB-regiocontrole precies
+      // welke pagina hij moet lezen.
+      steamPackageId: HSG.normalizeAppId(tpk.steam_package_id),
       keyType: 'steam',
       revealed: Boolean(tpk.redeemed_key_val),
       unavailable: false,
@@ -451,6 +456,7 @@
         gamekey: game.gamekey || 'dom',
         keyindex: game.keyindex != null ? game.keyindex : 0,
         steamAppId: game.steamAppId,
+        steamPackageId: game.steamPackageId != null ? game.steamPackageId : null,
         disallowedCountries: game.disallowedCountries || [],
         exclusiveCountries: game.exclusiveCountries || [],
         expiry: game.expiry || null,
@@ -621,7 +627,8 @@
         const order = await fetchOrder(probeKey);
         const tpks = (order && order.tpkd_dict && order.tpkd_dict.all_tpks) || [];
         apiOk = true;
-        apiDetail = `${tpks.length} keys in die order, waarvan ${tpks.filter(HSG.isUsableTpk).length} bruikbare Steam-keys`;
+        const withSub = tpks.filter((tpk) => HSG.normalizeAppId(tpk.steam_package_id)).length;
+        apiDetail = `${tpks.length} keys in die order, waarvan ${tpks.filter(HSG.isUsableTpk).length} bruikbare Steam-keys; ${withSub} met een Steam-pakket-id (voor de SteamDB-regiocontrole)`;
       }
     } catch (error) {
       apiDetail = String(error.message || error);

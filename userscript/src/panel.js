@@ -55,6 +55,7 @@
         <button type="button" class="btn" data-action="pause">Pauze</button>
         <button type="button" class="btn btn--danger" data-action="clear-queue">Leegmaken</button>
       </div>
+      <div class="hint" data-role="steamdb-status" hidden></div>
       <ol data-role="queue"></ol>
       <p class="empty" data-role="queue-empty">
         Nog niets in de wachtrij. Ga naar je Humble keys-pagina en vink daar spellen aan.
@@ -105,11 +106,14 @@
         </fieldset>
         <fieldset>
           <legend>Regio</legend>
-          <label class="check"><input type="checkbox" name="regionFromHumble" /> Regio overnemen van Humble</label>
+          <label class="check"><input type="checkbox" name="regionFromHumble" /> Regio automatisch overnemen</label>
+          <label class="check"><input type="checkbox" name="steamdbRegion" /> Regio via SteamDB controleren</label>
           <p class="hint">
-            Humble geeft per spel door waar de key niet werkt. Aan betekent: de
-            giveaway wordt beperkt tot de landen waar hij wél werkt.
-            Aangevinkt land = mag meedoen.
+            SteamDB toont wat het Steam-pakket zelf toestaat en is leidend;
+            meldt SteamDB niets bruikbaars, dan gelden Humble's gegevens. De
+            controle leest bij het toevoegen kort een paar pagina's op
+            steamdb.info via een achtergrondtabblad. Aangevinkt land = mag
+            meedoen.
           </p>
           <label class="check"><input type="checkbox" name="regionRestricted" /> Anders: vaste regio-restrictie</label>
           <label class="row">Landcodes (spatiegescheiden)
@@ -150,6 +154,7 @@
       <div class="actions">
         <button type="button" class="btn" data-action="diagnose">Deze pagina controleren</button>
         <button type="button" class="btn btn--danger" data-action="clear-keys">Wis opgeslagen keys</button>
+        <button type="button" class="btn" data-action="clear-steamdb">Wis SteamDB-cache</button>
       </div>
       <div data-role="diagnostics"></div>
     </section>
@@ -187,6 +192,7 @@
       notice: q('[data-role="notice"]'),
       queue: q('[data-role="queue"]'),
       queueEmpty: q('[data-role="queue-empty"]'),
+      steamdbStatus: q('[data-role="steamdb-status"]'),
       catalog: q('[data-role="catalog"]'),
       catalogHint: q('[data-role="catalog-hint"]'),
       filter: q('[data-role="filter"]'),
@@ -206,6 +212,7 @@
     // schuift de wachtrij op terwijl dit paneel op Humble openstaat.
     HSG.store.onChange(HSG.store.NAMES.QUEUE, () => render());
     HSG.store.onChange(HSG.store.NAMES.CATALOG, () => render());
+    HSG.store.onChange(HSG.store.NAMES.STEAMDB_JOBS, () => render());
 
     render();
     return ui;
@@ -245,6 +252,7 @@
     ui.queue.textContent = '';
     ui.queueEmpty.hidden = queue.items.length > 0;
     const keyIds = new Set(HSG.store.keyIds());
+    renderSteamdbStatus();
 
     queue.items.forEach((item, index) => {
       const li = el('li', 'queue-item');
@@ -260,6 +268,8 @@
       const bits = [];
       if (item.sgGameName) bits.push(`SteamGifts: ${item.sgGameName}`);
       else if (item.steamAppId) bits.push(`appid ${item.steamAppId}`);
+      const steamdbLabel = HSG.describeSteamdbStatus(item.steamdb);
+      if (steamdbLabel) bits.push(steamdbLabel);
       if (item.error) bits.push(item.error);
       if (item.giveawayUrl) bits.push(item.giveawayUrl);
       if (!keyIds.has(item.id) && item.status !== 'done') bits.push('geen key meer opgeslagen');
@@ -301,6 +311,40 @@
       li.append(tools);
       ui.queue.append(li);
     });
+  }
+
+  /** Loopt de SteamDB-regiocontrole nog, of wacht die op een Cloudflare-check? */
+  function renderSteamdbStatus() {
+    const node = ui.steamdbStatus;
+    if (!node) return;
+    const jobs = HSG.steamdb && HSG.steamdb.jobsSummary ? HSG.steamdb.jobsSummary() : null;
+    if (!jobs) {
+      node.hidden = true;
+      node.textContent = '';
+      return;
+    }
+    node.hidden = false;
+    node.textContent = '';
+    if (jobs.status === 'challenge') {
+      node.append(
+        el(
+          'span',
+          null,
+          'SteamDB vraagt om een controle voordat de regiocheck verder kan. Los die op in het SteamDB-tabblad (of open steamdb.info) en probeer opnieuw. '
+        ),
+        toolButton('Opnieuw proberen', () => {
+          if (!HSG.steamdb.retryLookups()) throw new Error('Geen openstaande controles.');
+        })
+      );
+    } else {
+      node.append(
+        el(
+          'span',
+          null,
+          `SteamDB-regiocontrole loopt nog voor ${jobs.open} spel${jobs.open === 1 ? '' : 'len'}…`
+        )
+      );
+    }
   }
 
   function toolButton(label, action) {
@@ -532,6 +576,9 @@
       notice(`Keys ophalen voor ${ids.length} ${ids.length === 1 ? 'spel' : 'spellen'}…`, 'ok');
       const results = await HSG.site.revealKeys(ids);
       const outcome = HSG.storeRevealResults(results);
+      // Regiocontrole bij SteamDB: uit de cache wat kan, de rest via het
+      // werktabblad. Loopt op de achtergrond door; de wachtrij toont de stand.
+      if (HSG.steamdb) HSG.steamdb.enqueueLookups(results);
       local.selected.clear();
       local.catalogSignature = null;
       notice(
@@ -552,6 +599,20 @@
     'clear-keys': () => {
       if (!confirm('Alle opgeslagen keys wissen? De wachtrij blijft staan.')) return;
       HSG.store.clearKeys();
+    },
+
+    'clear-steamdb': () => {
+      const stats = HSG.store.steamdbCacheStats();
+      if (
+        !confirm(
+          `De SteamDB-cache wissen (${stats.subs} pakket(ten), ${stats.apps} app(s))? Bij de volgende controle worden de pagina's opnieuw gelezen.`
+        )
+      ) {
+        return;
+      }
+      HSG.store.clearSteamdbCache();
+      HSG.store.setSteamdbJobs(null);
+      notice('SteamDB-cache gewist.', 'ok');
     },
   };
 
@@ -606,6 +667,7 @@
       groupIds: ids('groupIds'),
       contributorLevel: clamp(number('contributorLevel', 0), 0, 10),
       regionFromHumble: form.elements.regionFromHumble.checked,
+      steamdbRegion: form.elements.steamdbRegion.checked,
       regionRestricted: form.elements.regionRestricted.checked,
       countryIds: ids('countryIds'),
       description: form.elements.description.value,

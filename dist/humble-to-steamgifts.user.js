@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Humble → SteamGifts
 // @namespace    https://github.com/Brandjuh/HumbleBudle2Steamgifts
-// @version      0.1.0
+// @version      0.2.0
 // @description  Vink op je Humble keys-pagina aan wat je weggeeft; het SteamGifts-formulier wordt ingevuld, key en al.
 // @author       Brandjuh
 // @homepageURL  https://github.com/Brandjuh/HumbleBudle2Steamgifts
@@ -12,7 +12,9 @@
 // @match        https://www.humblebundle.com/subscription/*
 // @match        https://www.steamgifts.com/giveaways/new*
 // @match        https://www.steamgifts.com/giveaway/*
+// @match        https://steamdb.info/*
 // @run-at       document-idle
+// @grant        window.close
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
@@ -110,6 +112,7 @@
   HSG.URLS = {
     SG_NEW_GIVEAWAY: 'https://www.steamgifts.com/giveaways/new',
     HUMBLE_MEMBERSHIP: 'https://www.humblebundle.com/membership/home',
+    STEAMDB: 'https://steamdb.info',
   };
 
   HSG.DEFAULT_SETTINGS = {
@@ -133,6 +136,13 @@
      * een key die in zijn land niet activeert.
      */
     regionFromHumble: true,
+    /**
+     * De regio óók (en met voorrang) bij SteamDB controleren: daar staat wat
+     * het Steam-pakket zelf toestaat, en dat is betrouwbaarder dan wat Humble
+     * doorgeeft. Kost bij het toevoegen kort een achtergrondtabblad.
+     * Alleen de userscript-versie doet dit.
+     */
+    steamdbRegion: true,
     /** Regio-restrictie aan/uit als Humble niets meldt (of overnemen uit staat). */
     regionRestricted: false,
     /** data-item-id's (landcodes) uit de landenlijst van SteamGifts. */
@@ -300,6 +310,41 @@
 
       /** Rijen in het antwoord van de autocomplete-endpoint. */
       autocompleteRow: '.table__row-outer-wrap',
+    },
+
+    steamdb: {
+      /**
+       * De pakketlijst op /app/<appid>/subs/. Geverifieerd (2022–2024):
+       *   <tr class="package" data-subid="164520">
+       *     <td><a href="/sub/164520/">164520</a></td>
+       *     <td>PLAYERUNKNOWN'S BATTLEGROUNDS - Turkey Retail Keys</td>
+       *     <td></td>
+       *     <td>CD Key<br><small>(Buy Restrict)</small></td> …
+       */
+      packageRow: 'tr.package[data-subid], tr[data-subid]',
+      subLink: 'a[href*="/sub/"]',
+
+      /**
+       * De regiovelden op een pakketpagina staan als tekst in een gewone
+       * key/value-tabel; we matchen op de veldnaam zelf, niet op CSS-klassen —
+       * die zijn al eens veranderd. In de waardecel staan de landcodes vóór een
+       * <hr>; daarna volgen vlaggetjes met volledige landnamen.
+       */
+      infoRow: 'tr',
+
+      /** Billing-type teksten die betekenen "hier worden keys tegen aangemaakt". */
+      cdKeyPattern: /cd key|proof of prepurchase/i,
+      /** SteamDB's eigen markering dat een pakket een aankooprestrictie heeft. */
+      buyRestrictPattern: /buy restrict/i,
+      /**
+       * "The data for this package may be outdated, as our bot can no longer
+       * access the package info." — dan is "geen restrictierij" geen bewijs.
+       */
+      stalePattern: /data for this (?:package|app) may be outdated|bot can no longer access/i,
+      /** Lege pakketlijst omdat SteamDB een token mist. */
+      noPackagesPattern: /not included in any package known to us|needs a token to access/i,
+      /** Cloudflare-tussenpagina's, oud en nieuw. */
+      challengePattern: /just a moment|__cf_chl|cf-browser-verification|complete_sec_check|challenge-platform/i,
     },
   };
 
@@ -801,6 +846,296 @@
     return { allowedIds, blockedCodes, unknownCodes, unmapped };
   };
 
+  // --- SteamDB-pakketdata -----------------------------------------------------
+
+  /**
+   * Een landenlijst zoals SteamDB die toont: ISO-codes, gescheiden door spaties
+   * óf komma's ("RU BY KZ", "RU,BY"). Alles wat geen tweeletterige code is —
+   * vlagteksten, volledige landnamen — valt af.
+   */
+  HSG.splitCountryList = function (value) {
+    return String(value || '')
+      .split(/[\s,]+/)
+      .map((code) => code.trim().toUpperCase())
+      .filter((code) => /^[A-Z]{2}$/.test(code));
+  };
+
+  /**
+   * De vijf velden op een pakketpagina die over regio's gaan. De vlaggen zijn
+   * geen aparte beperkingen maar richtingaanwijzers: ze bepalen of de
+   * bijbehorende lijst een zwarte of een witte lijst is.
+   */
+  const STEAMDB_FIELDS = {
+    purchaserestrictedcountries: 'list',
+    allowpurchasefromrestrictedcountries: 'flag',
+    restrictedcountries: 'list',
+    onlyallowrestrictedcountries: 'flag',
+    onlyallowrunincountries: 'list',
+  };
+
+  /**
+   * Van ruwe tabelrijen ({label, value}) naar de bekende velden. Labels worden
+   * op tekst gematcht, niet op opmaak: SteamDB toont bekende sleutels als
+   * "PurchaseRestrictedCountries" en onbekende als "onlyallowrunincountries",
+   * en de CSS eromheen is al eens veranderd.
+   */
+  HSG.steamdbFieldsFromRows = function (rows) {
+    const fields = {};
+    for (const row of rows || []) {
+      const label = String((row && row.label) || '').trim().toLowerCase();
+      const kind = STEAMDB_FIELDS[label];
+      if (!kind) continue;
+      if (kind === 'list') fields[label] = HSG.splitCountryList(row.value);
+      else fields[label] = /^\s*(yes|true|1)\s*$/i.test(String((row && row.value) || ''));
+    }
+    return fields;
+  };
+
+  /**
+   * De betekenis van de velden, overgenomen uit hoe Steam ze zelf toepast:
+   * een land mag activeren als `(land ∈ lijst) == vlag`. Vlag aan maakt de
+   * lijst dus een witte lijst ("alleen hier"), vlag uit een zwarte lijst.
+   * `onlyallowrunincountries` is altijd een witte lijst (het spel start alleen
+   * dáár — strenger dan een activatieslot, dus nemen we hem mee).
+   *
+   * @returns {{disallowed: string[], exclusive: string[]|null}}
+   *   `exclusive: null` = geen witte lijst; een lege array betekent dat de
+   *   witte lijsten elkaar tegenspreken (nergens toegestaan).
+   */
+  HSG.steamdbRestrictions = function (fields) {
+    const f = fields || {};
+    const disallowed = new Set();
+    const whitelists = [];
+
+    const pair = (list, flag) => {
+      if (!list || list.length === 0) return;
+      if (flag) whitelists.push(list);
+      else for (const code of list) disallowed.add(code);
+    };
+    pair(f.purchaserestrictedcountries, f.allowpurchasefromrestrictedcountries);
+    pair(f.restrictedcountries, f.onlyallowrestrictedcountries);
+    if (f.onlyallowrunincountries && f.onlyallowrunincountries.length) {
+      whitelists.push(f.onlyallowrunincountries);
+    }
+
+    let exclusive = null;
+    for (const list of whitelists) {
+      if (exclusive === null) {
+        exclusive = Array.from(new Set(list));
+      } else {
+        const keep = new Set(list);
+        exclusive = exclusive.filter((code) => keep.has(code));
+      }
+    }
+    return { disallowed: Array.from(disallowed), exclusive };
+  };
+
+  /**
+   * Meerdere pakketten samenvoegen tot de strengste uitkomst: zwarte lijsten
+   * opgeteld, witte lijsten gesneden.
+   */
+  HSG.combineRestrictions = function (parts) {
+    const disallowed = new Set();
+    let exclusive = null;
+    for (const part of parts || []) {
+      if (!part) continue;
+      for (const code of part.disallowed || []) disallowed.add(code);
+      if (part.exclusive != null) {
+        if (exclusive === null) {
+          exclusive = Array.from(new Set(part.exclusive));
+        } else {
+          const keep = new Set(part.exclusive);
+          exclusive = exclusive.filter((code) => keep.has(code));
+        }
+      }
+    }
+    return { disallowed: Array.from(disallowed), exclusive };
+  };
+
+  /**
+   * Welke pakketten van een spel zijn het bekijken waard? Kandidaten komen uit
+   * de pakketlijst op SteamDB: alleen pakketten waar keys tegen aangemaakt
+   * worden tellen (`cdKey`), en `buyRestrict` is SteamDB's eigen markering dat
+   * er een aankooprestrictie op zit.
+   *
+   * Een Humble-key hoort meestal bij een generiek retail-pakket, soms bij een
+   * pakket met "Humble" in de naam. Regiovarianten ("… Turkey Retail Keys")
+   * staan er ook tussen, en dáár mag de uitkomst niet van afhangen — zie
+   * `resolveSteamdbCandidates`.
+   */
+  HSG.pickSteamdbSubs = function (candidates) {
+    const keySubs = (candidates || []).filter((c) => c && c.subId && c.cdKey);
+    if (keySubs.length === 0) return { subIds: [], reason: 'none' };
+
+    const humble = keySubs.filter((c) => /humble/i.test(c.name || ''));
+    if (humble.length > 0) {
+      return { subIds: humble.slice(0, 3).map((c) => c.subId), reason: 'humble' };
+    }
+    if (keySubs.length === 1) return { subIds: [keySubs[0].subId], reason: 'single' };
+    if (keySubs.length <= 4) return { subIds: keySubs.map((c) => c.subId), reason: 'all' };
+
+    const marked = keySubs.filter((c) => c.buyRestrict);
+    if (marked.length === 0) return { subIds: [], reason: 'unrestricted' };
+    return { subIds: marked.slice(0, 4).map((c) => c.subId), reason: 'marked' };
+  };
+
+  /**
+   * De opgehaalde pakketten naar één uitspraak. Bij een pakket dat duidelijk
+   * bij Humble hoort volgen we dat pakket; bij meerdere kandidaten alleen als
+   * het antwoord niet van de keuze afhangt. Anders zouden we een wereldwijde
+   * key kunnen opsluiten in de regio van een lokale winkelvariant — of
+   * omgekeerd.
+   *
+   * @param {{subId: string, stale: boolean, restrictions: object}[]} fetched
+   * @returns {{status: 'ok'|'stale'|'ambiguous'|'nosub', disallowed?, exclusive?, subIds: string[]}}
+   */
+  HSG.resolveSteamdbCandidates = function (fetched, reason) {
+    const usable = (fetched || []).filter(Boolean);
+    const subIds = usable.map((f) => f.subId);
+    if (usable.length === 0) return { status: 'nosub', subIds: [] };
+    // Verouderde pakketdata is geen basis voor een uitspraak.
+    if (usable.some((f) => f.stale)) return { status: 'stale', subIds };
+
+    const restrictions = usable.map((f) => f.restrictions || { disallowed: [], exclusive: null });
+    if (reason === 'humble' || usable.length === 1) {
+      return { status: 'ok', ...HSG.combineRestrictions(restrictions), subIds };
+    }
+
+    const signature = (r) =>
+      JSON.stringify({
+        d: (r.disallowed || []).slice().sort(),
+        e: r.exclusive == null ? null : r.exclusive.slice().sort(),
+      });
+    if (new Set(restrictions.map(signature)).size === 1) {
+      return { status: 'ok', ...HSG.combineRestrictions([restrictions[0]]), subIds };
+    }
+    return { status: 'ambiguous', subIds };
+  };
+
+  /**
+   * Welke regiobron geldt voor dit wachtrij-item? Eén beslispunt, zodat het
+   * formulier en het paneel hetzelfde verhaal vertellen.
+   *
+   * De volgorde is afgesproken: verse SteamDB-data is leidend — ook als die
+   * zegt "geen beperking" terwijl Humble wél landen noemt. Pas als SteamDB
+   * niets bruikbaars heeft vallen we terug op Humble, en daarna op de vaste
+   * instelling.
+   *
+   * @returns {{mode: 'steamdb'|'humble'|'fixed'|'none'|'off', disallowed: string[], exclusive: string[]|null, notes: string[]}}
+   *   `none` = een bron zegt expliciet "geen beperking"; `off` = niets bekend
+   *   en geen vaste restrictie ingesteld.
+   */
+  HSG.regionPlan = function (item, settings) {
+    const notes = [];
+    const humbleDisallowed = upperList(item && item.disallowedCountries);
+    const humbleExclusive = upperList(item && item.exclusiveCountries);
+    const humbleHas = humbleDisallowed.length > 0 || humbleExclusive.length > 0;
+    const sdb = (item && item.steamdb) || null;
+    const sdbUsable = settings.steamdbRegion !== false && sdb && sdb.status === 'ok';
+
+    const fixed = () => {
+      if (settings.regionRestricted) {
+        return { mode: 'fixed', disallowed: [], exclusive: null, notes };
+      }
+      return { mode: 'off', disallowed: [], exclusive: null, notes };
+    };
+
+    if (settings.regionFromHumble === false) {
+      if (humbleHas || (sdbUsable && ((sdb.disallowed || []).length || sdb.exclusive != null))) {
+        notes.push(
+          'Let op: er is regio-informatie voor dit spel, maar "regio automatisch overnemen" staat uit.'
+        );
+      }
+      return fixed();
+    }
+
+    if (sdbUsable) {
+      const disallowed = upperList(sdb.disallowed);
+      const exclusive = sdb.exclusive == null ? null : upperList(sdb.exclusive);
+
+      if (exclusive && exclusive.length === 0) {
+        // Witte lijsten die elkaar uitsluiten: nergens toegestaan. Dat is
+        // vrijwel zeker een datafout — dan liever Humble.
+        notes.push(
+          'De SteamDB-pakketdata spreekt zichzelf tegen (nergens toegestaan) — Humble-gegevens gebruikt.'
+        );
+      } else if (disallowed.length === 0 && exclusive === null) {
+        if (humbleHas) {
+          notes.push(
+            `SteamDB meldt geen regiobeperking voor dit pakket; Humble noemde er wel (${humbleDisallowed.length + humbleExclusive.length} landen). SteamDB is leidend — restrictie uit.`
+          );
+        }
+        return { mode: 'none', disallowed: [], exclusive: null, notes };
+      } else {
+        if (!humbleHas) {
+          notes.push('Humble meldde géén regiobeperking; SteamDB wel. SteamDB is leidend.');
+        } else if (
+          JSON.stringify(disallowed.slice().sort()) !==
+            JSON.stringify(humbleDisallowed.slice().sort()) ||
+          JSON.stringify((exclusive || []).slice().sort()) !==
+            JSON.stringify(humbleExclusive.slice().sort())
+        ) {
+          notes.push('SteamDB en Humble verschillen van mening over de regio; SteamDB is leidend.');
+        }
+        return { mode: 'steamdb', disallowed, exclusive, notes };
+      }
+    } else if (settings.steamdbRegion !== false && sdb && sdb.status && sdb.status !== 'ok') {
+      const why = {
+        pending: 'controle nog niet afgerond',
+        stale: 'SteamDB meldt dat de pakketdata verouderd is',
+        nosub: 'pakket niet gevonden op SteamDB',
+        ambiguous: 'meerdere pakketten mogelijk en ze spreken elkaar tegen',
+        challenge: 'SteamDB vroeg om een Cloudflare-controle',
+        error: 'controle mislukt',
+        nodata: 'geen Steam-appid bekend',
+      }[sdb.status] || sdb.status;
+      notes.push(
+        `SteamDB-regiocontrole niet bruikbaar (${why}) — ${humbleHas ? 'Humble-gegevens gebruikt' : 'geen regiodata'}.`
+      );
+    }
+
+    if (humbleHas) {
+      return {
+        mode: 'humble',
+        disallowed: humbleDisallowed,
+        exclusive: humbleExclusive.length > 0 ? humbleExclusive : null,
+        notes,
+      };
+    }
+    return fixed();
+  };
+
+  /** Korte omschrijving van een SteamDB-uitkomst, voor labels in het paneel. */
+  HSG.describeSteamdbStatus = function (sdb) {
+    if (!sdb || !sdb.status) return null;
+    switch (sdb.status) {
+      case 'ok': {
+        const exclusive = sdb.exclusive == null ? null : sdb.exclusive;
+        if (exclusive && exclusive.length > 0) {
+          return `regio via SteamDB: alleen ${exclusive.length} land${exclusive.length === 1 ? '' : 'en'}`;
+        }
+        const blocked = (sdb.disallowed || []).length;
+        return blocked > 0
+          ? `regio via SteamDB: ${blocked} land${blocked === 1 ? '' : 'en'} geblokkeerd`
+          : 'regio via SteamDB: geen beperking';
+      }
+      case 'pending':
+        return 'SteamDB-controle bezig…';
+      case 'stale':
+        return 'SteamDB-data verouderd — Humble-gegevens gebruikt';
+      case 'nosub':
+        return 'niet op SteamDB gevonden — Humble-gegevens gebruikt';
+      case 'ambiguous':
+        return 'SteamDB: meerdere pakketten mogelijk — Humble-gegevens gebruikt';
+      case 'challenge':
+        return 'SteamDB vraagt om een controle — zie de wachtrij';
+      case 'nodata':
+        return null;
+      default:
+        return `SteamDB-controle mislukt — Humble-gegevens gebruikt`;
+    }
+  };
+
   /**
    * Bouwt een unieke, stabiele id voor een wachtrij-item. Stabiel is belangrijk:
    * hij is tevens de sleutel waaronder de key in storage.session staat.
@@ -1022,9 +1357,11 @@
       gamekey: game.gamekey,
       keyindex: game.keyindex,
       steamAppId: game.steamAppId != null ? game.steamAppId : null,
+      steamPackageId: game.steamPackageId != null ? game.steamPackageId : null,
       disallowedCountries: game.disallowedCountries || [],
       exclusiveCountries: game.exclusiveCountries || [],
       expiry: game.expiry || null,
+      steamdb: game.steamdb || null,
       status: STATUS.PENDING,
       error: null,
       sgGameId: null,
@@ -1162,7 +1499,14 @@
     QUEUE: 'queue',
     CATALOG: 'catalog',
     SECRETS: 'secrets',
+    STEAMDB_CACHE: 'steamdbCache',
+    STEAMDB_JOBS: 'steamdbJobs',
   };
+
+  /** Hoe lang SteamDB-pakketdata houdbaar is. Restricties wijzigen zelden. */
+  const STEAMDB_TTL_OK_MS = 14 * 24 * 3600 * 1000;
+  /** Negatieve of verouderde uitkomsten korter bewaren: die kunnen bijtrekken. */
+  const STEAMDB_TTL_BAD_MS = 24 * 3600 * 1000;
 
   const read = (name, fallback) => {
     try {
@@ -1175,6 +1519,13 @@
   };
 
   const write = (name, value) => GM_setValue(name, JSON.stringify(value));
+
+  /** Een cache-item alleen teruggeven zolang het houdbaar is. */
+  const freshSteamdbEntry = (entry) => {
+    if (!entry || !entry.fetchedAt) return null;
+    const ttl = entry.status === 'ok' ? STEAMDB_TTL_OK_MS : STEAMDB_TTL_BAD_MS;
+    return Date.now() - entry.fetchedAt < ttl ? entry : null;
+  };
 
   const store = {
     // --- instellingen ---------------------------------------------------------
@@ -1278,6 +1629,57 @@
 
     clearKeys() {
       write(KEYS.SECRETS, {});
+    },
+
+    // --- SteamDB-cache --------------------------------------------------------
+
+    /**
+     * Pakketdata van SteamDB, gesleuteld op subid/appid. Vers genoeg = niet
+     * opnieuw ophalen; zo blijft het aantal paginaweergaven minimaal.
+     */
+    readSteamdbSub(subId) {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      return freshSteamdbEntry((cache.subs || {})[String(subId)]);
+    },
+
+    putSteamdbSub(subId, entry) {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      cache.subs = cache.subs || {};
+      cache.subs[String(subId)] = { ...entry, fetchedAt: Date.now() };
+      write(KEYS.STEAMDB_CACHE, cache);
+    },
+
+    readSteamdbApp(appId) {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      return freshSteamdbEntry((cache.apps || {})[String(appId)]);
+    },
+
+    putSteamdbApp(appId, entry) {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      cache.apps = cache.apps || {};
+      cache.apps[String(appId)] = { ...entry, fetchedAt: Date.now() };
+      write(KEYS.STEAMDB_CACHE, cache);
+    },
+
+    steamdbCacheStats() {
+      const cache = read(KEYS.STEAMDB_CACHE, {});
+      return {
+        subs: Object.keys(cache.subs || {}).length,
+        apps: Object.keys(cache.apps || {}).length,
+      };
+    },
+
+    clearSteamdbCache() {
+      write(KEYS.STEAMDB_CACHE, {});
+    },
+
+    /** Het takenlijstje voor het SteamDB-werktabblad. */
+    getSteamdbJobs() {
+      return read(KEYS.STEAMDB_JOBS, null);
+    },
+
+    setSteamdbJobs(record) {
+      write(KEYS.STEAMDB_JOBS, record ? { ...record, updatedAt: Date.now() } : null);
     },
 
     // --- meeluisteren ---------------------------------------------------------
@@ -1553,6 +1955,589 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
 })(typeof globalThis !== 'undefined' ? globalThis : window);
 
 // ==========================================================================
+// userscript/src/steamdb.js
+// ==========================================================================
+
+/**
+ * De SteamDB-kant: het werk-tabblad dat pakketpagina's leest.
+ *
+ * SteamDB heeft geen API en staat scrapen niet toe. Wat wél kan: dit script
+ * draait zelf op steamdb.info, in de browser van de gebruiker. Bij het
+ * toevoegen aan de wachtrij opent de Humble-pagina hier één achtergrondtabblad
+ * (met `#hsg-worker` in de URL); dat tabblad leest zijn eigen pagina en haalt
+ * de overige pagina's één voor één op met gewone same-origin fetches — rustig
+ * aan, met pauzes, en alles gaat in een cache van twee weken zodat dezelfde
+ * pagina nooit twee keer geladen wordt. Voor SteamDB is dit niet te
+ * onderscheiden van gewoon browsen, en een eventuele Cloudflare-controle kan
+ * de gebruiker gewoon zelf oplossen.
+ *
+ * De uitkomst per spel gaat als `steamdb`-veld het wachtrij-item in; de
+ * SteamGifts-kant beslist daarmee via `HSG.regionPlan` over de regio.
+ */
+'use strict';
+
+(function (root) {
+  const HSG = (root.HSG = root.HSG || {});
+  const SD = HSG.SELECTORS.steamdb;
+
+  const WORKER_MARK = 'hsg-worker';
+  /** Na zo lang zonder hartslag geldt een werktabblad als verdwenen. */
+  const HEARTBEAT_STALE_MS = 20000;
+  const WORKER_ID = `w${Math.random().toString(36).slice(2)}`;
+
+  const isWorkerTab = () => location.hash.indexOf(WORKER_MARK) !== -1;
+
+  // --- pagina's lezen ---------------------------------------------------------
+
+  /**
+   * De waardecel van een restrictierij: de landcodes staan vóór de <hr>,
+   * daarna volgen vlaggetjes met volledige landnamen die we niet willen.
+   */
+  function cellValue(td) {
+    let text = '';
+    for (const node of td.childNodes) {
+      if (node.nodeType === 1 && node.tagName === 'HR') break;
+      text += node.textContent || '';
+    }
+    return text.replace(/\s+/g, ' ').trim();
+  }
+
+  function rowPairs(doc) {
+    const rows = [];
+    for (const tr of doc.querySelectorAll(SD.infoRow)) {
+      const cells = tr.querySelectorAll('td');
+      if (cells.length < 2) continue;
+      const label = (cells[0].textContent || '').replace(/\s+/g, ' ').trim();
+      if (!label || label.length > 60) continue;
+      rows.push({ label, value: cellValue(cells[1]) });
+    }
+    return rows;
+  }
+
+  function pageName(doc) {
+    const h1 = doc.querySelector('h1[itemprop="name"], .pagehead h1, h1');
+    const fromH1 = h1 && h1.textContent.replace(/\s+/g, ' ').trim();
+    if (fromH1) return fromH1;
+    return (doc.title || '').replace(/\s*·\s*SteamDB.*$/i, '').trim() || null;
+  }
+
+  function parseSubDocument(doc) {
+    const bodyText = doc.body ? doc.body.textContent : '';
+    return {
+      stale: SD.stalePattern.test(bodyText),
+      restrictions: HSG.steamdbRestrictions(HSG.steamdbFieldsFromRows(rowPairs(doc))),
+      name: pageName(doc),
+    };
+  }
+
+  function parseAppSubsDocument(doc) {
+    const candidates = [];
+    const seen = new Set();
+
+    for (const row of doc.querySelectorAll(SD.packageRow)) {
+      const subId = row.getAttribute('data-subid');
+      if (!subId || seen.has(subId)) continue;
+      const cells = row.querySelectorAll('td');
+      if (cells.length < 2) continue;
+      // Kolommen: SubID | Name | (leeg) | Billing Type | Last Update.
+      const billing =
+        cells.length >= 4
+          ? cells[3].textContent || ''
+          : Array.from(cells).slice(2).map((td) => td.textContent).join(' ');
+      seen.add(subId);
+      candidates.push({
+        subId,
+        name: (cells[1].textContent || '').replace(/\s+/g, ' ').trim(),
+        cdKey: SD.cdKeyPattern.test(billing),
+        buyRestrict: SD.buyRestrictPattern.test(billing),
+      });
+    }
+
+    // Terugval als `tr.package` ooit verdwijnt: rijen met een /sub/-link.
+    if (candidates.length === 0) {
+      for (const link of doc.querySelectorAll(SD.subLink)) {
+        const match = /\/sub\/(\d+)/.exec(link.getAttribute('href') || '');
+        const row = link.closest('tr');
+        if (!match || !row || seen.has(match[1])) continue;
+        const cells = row.querySelectorAll('td');
+        if (cells.length < 3) continue;
+        seen.add(match[1]);
+        const text = row.textContent || '';
+        candidates.push({
+          subId: match[1],
+          name: (cells[1] ? cells[1].textContent : '').replace(/\s+/g, ' ').trim(),
+          cdKey: SD.cdKeyPattern.test(text),
+          buyRestrict: SD.buyRestrictPattern.test(text),
+        });
+      }
+    }
+
+    const bodyText = doc.body ? doc.body.textContent : '';
+    return { candidates, noPackages: SD.noPackagesPattern.test(bodyText) };
+  }
+
+  const isChallengeDocument = (doc) =>
+    SD.challengePattern.test(doc.title || '') ||
+    Boolean(doc.querySelector('#challenge-form, #challenge-running, #cf-challenge-running'));
+
+  // --- ophalen ----------------------------------------------------------------
+
+  /** Ging er in de huidige taak iets over het netwerk? Dan pauzeren we erna. */
+  let touchedNetwork = false;
+
+  async function fetchDoc(path) {
+    touchedNetwork = true;
+    const response = await fetch(path, {
+      credentials: 'include',
+      headers: { Accept: 'text/html' },
+    });
+
+    if (response.status === 429) {
+      const retry = Number(response.headers.get('Retry-After')) || 30;
+      const error = new Error(`SteamDB vraagt om rust (429).`);
+      error.kind = 'ratelimit';
+      error.retryAfter = Math.min(retry, 120);
+      throw error;
+    }
+
+    const text = await response.text();
+    if (!response.ok) {
+      if (response.status === 404) {
+        const error = new Error('Niet gevonden op SteamDB (404).');
+        error.kind = 'notfound';
+        throw error;
+      }
+      const error = new Error(`SteamDB antwoordde met ${response.status}.`);
+      error.kind =
+        response.status === 403 ||
+        response.status === 503 ||
+        SD.challengePattern.test(text.slice(0, 6000))
+          ? 'challenge'
+          : 'http';
+      throw error;
+    }
+    return new DOMParser().parseFromString(text, 'text/html');
+  }
+
+  /** De eigen pagina van het werktabblad hoeft niet nóg een keer opgehaald. */
+  const onOwnPage = (path) =>
+    location.pathname === path || location.pathname === path.replace(/\/$/, '');
+
+  async function lookupSub(subId) {
+    const cached = HSG.store.readSteamdbSub(subId);
+    if (cached) return cached;
+
+    let entry;
+    try {
+      const path = `/sub/${subId}/`;
+      const doc = onOwnPage(path) ? document : await fetchDoc(path);
+      entry = { status: 'ok', ...parseSubDocument(doc) };
+    } catch (error) {
+      if (error.kind !== 'notfound') throw error; // challenge/ratelimit/http bubbelt op
+      entry = { status: 'notfound' };
+    }
+    HSG.store.putSteamdbSub(subId, entry);
+    return entry;
+  }
+
+  async function lookupApp(appId) {
+    const cached = HSG.store.readSteamdbApp(appId);
+    if (cached) return cached;
+
+    let entry;
+    try {
+      const path = `/app/${appId}/subs/`;
+      const doc = onOwnPage(path) ? document : await fetchDoc(path);
+      entry = { status: 'ok', ...parseAppSubsDocument(doc) };
+    } catch (error) {
+      if (error.kind !== 'notfound') throw error;
+      entry = { status: 'notfound' };
+    }
+    HSG.store.putSteamdbApp(appId, entry);
+    return entry;
+  }
+
+  const pause = () => HSG.sleep(2000 + Math.random() * 3000);
+
+  /**
+   * Eén spel: van pakket-id (of app-id) naar een regio-uitspraak.
+   * Gooit alleen bij challenge/ratelimit/netwerkfouten; inhoudelijke
+   * uitkomsten ("niet gevonden", "meerdere kandidaten") zijn gewone statussen.
+   */
+  async function lookupJob(job) {
+    if (job.subId) {
+      const entry = await lookupSub(job.subId);
+      if (entry.status === 'ok') {
+        const resolved = HSG.resolveSteamdbCandidates(
+          [{ subId: String(job.subId), stale: entry.stale, restrictions: entry.restrictions }],
+          'direct'
+        );
+        return { ...resolved, subName: entry.name || null };
+      }
+      // Het directe pakket bestaat niet (meer): door naar de pakketlijst.
+    }
+
+    if (!job.appId) return { status: job.subId ? 'nosub' : 'nodata', subIds: [] };
+
+    const appEntry = await lookupApp(job.appId);
+    if (appEntry.status !== 'ok' || appEntry.noPackages || (appEntry.candidates || []).length === 0) {
+      return { status: 'nosub', subIds: [] };
+    }
+
+    const pick = HSG.pickSteamdbSubs(appEntry.candidates);
+    if (pick.reason === 'none') return { status: 'nosub', subIds: [] };
+    if (pick.reason === 'unrestricted') {
+      return { status: 'ok', disallowed: [], exclusive: null, subIds: [] };
+    }
+
+    const fetched = [];
+    for (const subId of pick.subIds) {
+      touchedNetwork = false;
+      const entry = await lookupSub(subId);
+      if (entry.status === 'ok') {
+        fetched.push({ subId: String(subId), stale: entry.stale, restrictions: entry.restrictions });
+      }
+      if (touchedNetwork) await pause();
+    }
+    return HSG.resolveSteamdbCandidates(fetched, pick.reason);
+  }
+
+  function applyToQueue(itemId, result) {
+    HSG.store.withQueue((queue) =>
+      HSG.updateItem(queue, itemId, { steamdb: { ...result, checkedAt: Date.now() } })
+    );
+  }
+
+  // --- de takenlijst (cachebeslissingen zonder netwerk) -----------------------
+
+  const stamp = (result) => ({ ...result });
+
+  /** Zelfde beslissing als `lookupJob`, maar uitsluitend uit de cache. */
+  function resolveFromCache(subId, appId) {
+    if (subId) {
+      const entry = HSG.store.readSteamdbSub(subId);
+      if (!entry) return null;
+      if (entry.status === 'ok') {
+        return stamp({
+          ...HSG.resolveSteamdbCandidates(
+            [{ subId: String(subId), stale: entry.stale, restrictions: entry.restrictions }],
+            'direct'
+          ),
+          subName: entry.name || null,
+        });
+      }
+      // notfound in cache → beslis via de pakketlijst van de app, indien bekend.
+    }
+    if (!appId) return subId ? stamp({ status: 'nosub', subIds: [] }) : null;
+
+    const appEntry = HSG.store.readSteamdbApp(appId);
+    if (!appEntry) return null;
+    if (appEntry.status !== 'ok' || appEntry.noPackages || !(appEntry.candidates || []).length) {
+      return stamp({ status: 'nosub', subIds: [] });
+    }
+    const pick = HSG.pickSteamdbSubs(appEntry.candidates);
+    if (pick.reason === 'none') return stamp({ status: 'nosub', subIds: [] });
+    if (pick.reason === 'unrestricted') {
+      return stamp({ status: 'ok', disallowed: [], exclusive: null, subIds: [] });
+    }
+    const fetched = [];
+    for (const id of pick.subIds) {
+      const entry = HSG.store.readSteamdbSub(id);
+      if (!entry) return null; // eentje mist → toch een taak voor het werktabblad
+      if (entry.status === 'ok') {
+        fetched.push({ subId: String(id), stale: entry.stale, restrictions: entry.restrictions });
+      }
+    }
+    return stamp(HSG.resolveSteamdbCandidates(fetched, pick.reason));
+  }
+
+  let workerHandle = null;
+  let watching = false;
+
+  /** Sluit het werktabblad zodra het klaar meldt. */
+  function watchJobs() {
+    if (watching) return;
+    watching = true;
+    HSG.store.onChange(HSG.store.NAMES.STEAMDB_JOBS, () => {
+      const record = HSG.store.getSteamdbJobs();
+      if (record && record.status === 'done' && workerHandle && !workerHandle.closed) {
+        try {
+          workerHandle.close();
+        } catch (error) {
+          // Dan sluit het tabblad zichzelf wel.
+        }
+        workerHandle = null;
+      }
+      if (HSG.panel && HSG.panel.render) HSG.panel.render();
+    });
+  }
+
+  function openWorkerIfNeeded(record) {
+    const active =
+      record.status === 'running' &&
+      record.heartbeatAt &&
+      Date.now() - record.heartbeatAt < HEARTBEAT_STALE_MS;
+    if (active) return;
+    if (workerHandle && !workerHandle.closed) return;
+
+    const first = (record.jobs || []).find((job) => !job.done);
+    if (!first) return;
+    const path = first.subId
+      ? `/sub/${first.subId}/`
+      : first.appId
+        ? `/app/${first.appId}/subs/`
+        : '/';
+    try {
+      workerHandle = GM_openInTab(`${HSG.URLS.STEAMDB}${path}#${WORKER_MARK}`, {
+        active: false,
+        insert: true,
+        setParent: true,
+      });
+      if (workerHandle) workerHandle.onclose = () => (workerHandle = null);
+    } catch (error) {
+      // GM_openInTab niet beschikbaar; de gebruiker kan SteamDB zelf openen.
+    }
+    watchJobs();
+  }
+
+  /**
+   * Vanaf de Humble-kant: voor zojuist toegevoegde spellen uitzoeken wat
+   * SteamDB van de regio vindt. Wat uit de cache kan wordt meteen beslist;
+   * de rest gaat als taak naar het werktabblad.
+   */
+  function enqueueLookups(entries) {
+    const settings = HSG.store.getSettings();
+    if (settings.steamdbRegion === false) return { queued: 0 };
+
+    const jobs = [];
+    for (const entry of entries || []) {
+      const itemId = HSG.itemId(entry.gamekey, entry.machineName);
+      const subId = entry.steamPackageId || null;
+      const appId = entry.steamAppId || null;
+
+      if (!subId && !appId) {
+        applyToQueue(itemId, { status: 'nodata', subIds: [] });
+        continue;
+      }
+      const cached = resolveFromCache(subId, appId);
+      if (cached) {
+        applyToQueue(itemId, cached);
+        continue;
+      }
+      applyToQueue(itemId, { status: 'pending', subIds: [] });
+      jobs.push({ itemId, subId, appId, name: entry.humanName || null, done: false });
+    }
+    if (jobs.length === 0) return { queued: 0 };
+
+    const existing = HSG.store.getSteamdbJobs();
+    const keep =
+      existing && Array.isArray(existing.jobs)
+        ? existing.jobs.filter(
+            (job) => !job.done && !jobs.some((fresh) => fresh.itemId === job.itemId)
+          )
+        : [];
+    const running =
+      existing &&
+      existing.status === 'running' &&
+      existing.heartbeatAt &&
+      Date.now() - existing.heartbeatAt < HEARTBEAT_STALE_MS;
+
+    const record = {
+      jobs: keep.concat(jobs),
+      status: running ? 'running' : 'pending',
+      workerId: running ? existing.workerId : null,
+      heartbeatAt: running ? existing.heartbeatAt : 0,
+      startedAt: Date.now(),
+    };
+    HSG.store.setSteamdbJobs(record);
+    openWorkerIfNeeded(record);
+    return { queued: jobs.length };
+  }
+
+  /** Voor het paneel: loopt er nog iets, en zit het vast op een controle? */
+  function jobsSummary() {
+    const record = HSG.store.getSteamdbJobs();
+    if (!record || !Array.isArray(record.jobs)) return null;
+    const open = record.jobs.filter((job) => !job.done).length;
+    if (open === 0) return null;
+    return { open, total: record.jobs.length, status: record.status };
+  }
+
+  /** Na een opgeloste Cloudflare-controle: opnieuw een werktabblad openen. */
+  function retryLookups() {
+    const record = HSG.store.getSteamdbJobs();
+    if (!record || !(record.jobs || []).some((job) => !job.done)) return false;
+    const next = { ...record, status: 'pending', heartbeatAt: 0 };
+    HSG.store.setSteamdbJobs(next);
+    openWorkerIfNeeded(next);
+    return true;
+  }
+
+  // --- het werktabblad zelf ---------------------------------------------------
+
+  let overlayNode = null;
+
+  function overlay(message, button) {
+    if (!overlayNode) {
+      overlayNode = document.createElement('div');
+      overlayNode.style.cssText =
+        'position:fixed;right:16px;bottom:16px;z-index:99999;background:#1b2838;' +
+        'color:#fff;padding:12px 16px;border-radius:8px;font:13px/1.5 sans-serif;' +
+        'box-shadow:0 4px 16px rgba(0,0,0,.4);max-width:340px;';
+      document.body.appendChild(overlayNode);
+    }
+    overlayNode.textContent = '';
+    const text = document.createElement('div');
+    text.textContent = `Humble → SteamGifts: ${message}`;
+    overlayNode.appendChild(text);
+    if (button) {
+      const node = document.createElement('button');
+      node.type = 'button';
+      node.textContent = button.label;
+      node.style.cssText =
+        'margin-top:8px;padding:4px 10px;border:0;border-radius:4px;cursor:pointer;';
+      node.addEventListener('click', button.onClick);
+      overlayNode.appendChild(node);
+    }
+  }
+
+  function markJobDone(itemId) {
+    const record = HSG.store.getSteamdbJobs();
+    if (!record || !Array.isArray(record.jobs)) return;
+    HSG.store.setSteamdbJobs({
+      ...record,
+      jobs: record.jobs.map((job) => (job.itemId === itemId ? { ...job, done: true } : job)),
+      heartbeatAt: Date.now(),
+    });
+  }
+
+  async function runJobs() {
+    let record = HSG.store.getSteamdbJobs();
+    if (!record || !Array.isArray(record.jobs) || !record.jobs.some((job) => !job.done)) {
+      overlay('niets meer te doen — dit tabblad mag dicht.');
+      return;
+    }
+    // Niet met z'n tweeën aan dezelfde lijst werken.
+    const otherActive =
+      record.status === 'running' &&
+      record.workerId &&
+      record.workerId !== WORKER_ID &&
+      record.heartbeatAt &&
+      Date.now() - record.heartbeatAt < HEARTBEAT_STALE_MS;
+    if (otherActive) return;
+
+    HSG.store.setSteamdbJobs({
+      ...record,
+      status: 'running',
+      workerId: WORKER_ID,
+      heartbeatAt: Date.now(),
+    });
+
+    const total = record.jobs.length;
+    let waits = 0;
+
+    for (;;) {
+      record = HSG.store.getSteamdbJobs();
+      const openJobs = (record && record.jobs) || [];
+      const job = openJobs.find((entry) => !entry.done);
+      if (!job) break;
+
+      const done = openJobs.filter((entry) => entry.done).length;
+      overlay(
+        `pakketdata lezen — ${job.name || job.subId || job.appId} (${done + 1} van ${Math.max(total, openJobs.length)})…`
+      );
+      HSG.store.setSteamdbJobs({ ...record, heartbeatAt: Date.now() });
+
+      touchedNetwork = false;
+      let result;
+      try {
+        result = await lookupJob(job);
+        waits = 0;
+      } catch (error) {
+        if (error.kind === 'ratelimit' && waits < 2) {
+          waits += 1;
+          overlay(`SteamDB vraagt om rust — ${error.retryAfter}s wachten…`);
+          await HSG.sleep(error.retryAfter * 1000);
+          continue; // zelfde taak opnieuw
+        }
+        if (error.kind === 'challenge') {
+          HSG.store.setSteamdbJobs({ ...HSG.store.getSteamdbJobs(), status: 'challenge' });
+          overlay(
+            'SteamDB vraagt om een controle. Ververs deze pagina en los de check op — daarna gaat het vanzelf verder.',
+            { label: 'Opnieuw proberen', onClick: () => location.reload() }
+          );
+          return; // tabblad open laten, anders valt er niets op te lossen
+        }
+        result = { status: 'error', subIds: [], error: String(error.message || error) };
+        waits = 0;
+      }
+
+      applyToQueue(job.itemId, result);
+      markJobDone(job.itemId);
+      if (touchedNetwork) await pause();
+    }
+
+    HSG.store.setSteamdbJobs({ ...HSG.store.getSteamdbJobs(), status: 'done' });
+    overlay('klaar — dit tabblad sluit zichzelf.');
+    // De opener sluit ons via zijn tab-handle; dit is de terugval voor als die
+    // pagina inmiddels dicht is. Vereist `@grant window.close`.
+    setTimeout(() => {
+      try {
+        window.close();
+      } catch (error) {
+        // Laatste tabblad van het venster — dan blijft het gewoon staan.
+      }
+    }, 1500);
+  }
+
+  // --- opstarten --------------------------------------------------------------
+
+  function boot() {
+    if (isChallengeDocument(document)) {
+      const record = HSG.store.getSteamdbJobs();
+      if (record && (record.jobs || []).some((job) => !job.done)) {
+        HSG.store.setSteamdbJobs({ ...record, status: 'challenge' });
+      }
+      return; // na het oplossen herlaadt de pagina en draait dit script opnieuw
+    }
+
+    if (isWorkerTab()) {
+      runJobs().catch((error) =>
+        console.error('[Humble → SteamGifts]', HSG.redact(String(error && error.message) || String(error)))
+      );
+      return;
+    }
+
+    // Gewoon aan het browsen op SteamDB. Ligt er nog werk en is er geen
+    // werktabblad actief (bijvoorbeeld na een Cloudflare-controle), bied dan
+    // aan het hier af te maken — deze pagina is al door de controle heen.
+    const record = HSG.store.getSteamdbJobs();
+    const waiting = record && (record.jobs || []).some((job) => !job.done);
+    const active =
+      record &&
+      record.status === 'running' &&
+      record.heartbeatAt &&
+      Date.now() - record.heartbeatAt < HEARTBEAT_STALE_MS;
+    if (waiting && !active) {
+      const open = record.jobs.filter((job) => !job.done).length;
+      overlay(`er staan nog ${open} regiocontrole(s) klaar.`, {
+        label: 'Nu uitvoeren',
+        onClick: () => runJobs(),
+      });
+    }
+  }
+
+  HSG.steamdb = {
+    boot,
+    enqueueLookups,
+    jobsSummary,
+    retryLookups,
+    /** Alleen voor tests: de parsers los kunnen aanroepen op een Document. */
+    parsers: { cellValue, rowPairs, parseSubDocument, parseAppSubsDocument },
+  };
+})(typeof globalThis !== 'undefined' ? globalThis : window);
+
+// ==========================================================================
 // userscript/src/panel.js
 // ==========================================================================
 
@@ -1613,6 +2598,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
         <button type="button" class="btn" data-action="pause">Pauze</button>
         <button type="button" class="btn btn--danger" data-action="clear-queue">Leegmaken</button>
       </div>
+      <div class="hint" data-role="steamdb-status" hidden></div>
       <ol data-role="queue"></ol>
       <p class="empty" data-role="queue-empty">
         Nog niets in de wachtrij. Ga naar je Humble keys-pagina en vink daar spellen aan.
@@ -1663,11 +2649,14 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
         </fieldset>
         <fieldset>
           <legend>Regio</legend>
-          <label class="check"><input type="checkbox" name="regionFromHumble" /> Regio overnemen van Humble</label>
+          <label class="check"><input type="checkbox" name="regionFromHumble" /> Regio automatisch overnemen</label>
+          <label class="check"><input type="checkbox" name="steamdbRegion" /> Regio via SteamDB controleren</label>
           <p class="hint">
-            Humble geeft per spel door waar de key niet werkt. Aan betekent: de
-            giveaway wordt beperkt tot de landen waar hij wél werkt.
-            Aangevinkt land = mag meedoen.
+            SteamDB toont wat het Steam-pakket zelf toestaat en is leidend;
+            meldt SteamDB niets bruikbaars, dan gelden Humble's gegevens. De
+            controle leest bij het toevoegen kort een paar pagina's op
+            steamdb.info via een achtergrondtabblad. Aangevinkt land = mag
+            meedoen.
           </p>
           <label class="check"><input type="checkbox" name="regionRestricted" /> Anders: vaste regio-restrictie</label>
           <label class="row">Landcodes (spatiegescheiden)
@@ -1708,6 +2697,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       <div class="actions">
         <button type="button" class="btn" data-action="diagnose">Deze pagina controleren</button>
         <button type="button" class="btn btn--danger" data-action="clear-keys">Wis opgeslagen keys</button>
+        <button type="button" class="btn" data-action="clear-steamdb">Wis SteamDB-cache</button>
       </div>
       <div data-role="diagnostics"></div>
     </section>
@@ -1745,6 +2735,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       notice: q('[data-role="notice"]'),
       queue: q('[data-role="queue"]'),
       queueEmpty: q('[data-role="queue-empty"]'),
+      steamdbStatus: q('[data-role="steamdb-status"]'),
       catalog: q('[data-role="catalog"]'),
       catalogHint: q('[data-role="catalog-hint"]'),
       filter: q('[data-role="filter"]'),
@@ -1764,6 +2755,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     // schuift de wachtrij op terwijl dit paneel op Humble openstaat.
     HSG.store.onChange(HSG.store.NAMES.QUEUE, () => render());
     HSG.store.onChange(HSG.store.NAMES.CATALOG, () => render());
+    HSG.store.onChange(HSG.store.NAMES.STEAMDB_JOBS, () => render());
 
     render();
     return ui;
@@ -1803,6 +2795,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     ui.queue.textContent = '';
     ui.queueEmpty.hidden = queue.items.length > 0;
     const keyIds = new Set(HSG.store.keyIds());
+    renderSteamdbStatus();
 
     queue.items.forEach((item, index) => {
       const li = el('li', 'queue-item');
@@ -1818,6 +2811,8 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       const bits = [];
       if (item.sgGameName) bits.push(`SteamGifts: ${item.sgGameName}`);
       else if (item.steamAppId) bits.push(`appid ${item.steamAppId}`);
+      const steamdbLabel = HSG.describeSteamdbStatus(item.steamdb);
+      if (steamdbLabel) bits.push(steamdbLabel);
       if (item.error) bits.push(item.error);
       if (item.giveawayUrl) bits.push(item.giveawayUrl);
       if (!keyIds.has(item.id) && item.status !== 'done') bits.push('geen key meer opgeslagen');
@@ -1859,6 +2854,40 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       li.append(tools);
       ui.queue.append(li);
     });
+  }
+
+  /** Loopt de SteamDB-regiocontrole nog, of wacht die op een Cloudflare-check? */
+  function renderSteamdbStatus() {
+    const node = ui.steamdbStatus;
+    if (!node) return;
+    const jobs = HSG.steamdb && HSG.steamdb.jobsSummary ? HSG.steamdb.jobsSummary() : null;
+    if (!jobs) {
+      node.hidden = true;
+      node.textContent = '';
+      return;
+    }
+    node.hidden = false;
+    node.textContent = '';
+    if (jobs.status === 'challenge') {
+      node.append(
+        el(
+          'span',
+          null,
+          'SteamDB vraagt om een controle voordat de regiocheck verder kan. Los die op in het SteamDB-tabblad (of open steamdb.info) en probeer opnieuw. '
+        ),
+        toolButton('Opnieuw proberen', () => {
+          if (!HSG.steamdb.retryLookups()) throw new Error('Geen openstaande controles.');
+        })
+      );
+    } else {
+      node.append(
+        el(
+          'span',
+          null,
+          `SteamDB-regiocontrole loopt nog voor ${jobs.open} spel${jobs.open === 1 ? '' : 'len'}…`
+        )
+      );
+    }
   }
 
   function toolButton(label, action) {
@@ -2090,6 +3119,9 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       notice(`Keys ophalen voor ${ids.length} ${ids.length === 1 ? 'spel' : 'spellen'}…`, 'ok');
       const results = await HSG.site.revealKeys(ids);
       const outcome = HSG.storeRevealResults(results);
+      // Regiocontrole bij SteamDB: uit de cache wat kan, de rest via het
+      // werktabblad. Loopt op de achtergrond door; de wachtrij toont de stand.
+      if (HSG.steamdb) HSG.steamdb.enqueueLookups(results);
       local.selected.clear();
       local.catalogSignature = null;
       notice(
@@ -2110,6 +3142,20 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     'clear-keys': () => {
       if (!confirm('Alle opgeslagen keys wissen? De wachtrij blijft staan.')) return;
       HSG.store.clearKeys();
+    },
+
+    'clear-steamdb': () => {
+      const stats = HSG.store.steamdbCacheStats();
+      if (
+        !confirm(
+          `De SteamDB-cache wissen (${stats.subs} pakket(ten), ${stats.apps} app(s))? Bij de volgende controle worden de pagina's opnieuw gelezen.`
+        )
+      ) {
+        return;
+      }
+      HSG.store.clearSteamdbCache();
+      HSG.store.setSteamdbJobs(null);
+      notice('SteamDB-cache gewist.', 'ok');
     },
   };
 
@@ -2164,6 +3210,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       groupIds: ids('groupIds'),
       contributorLevel: clamp(number('contributorLevel', 0), 0, 10),
       regionFromHumble: form.elements.regionFromHumble.checked,
+      steamdbRegion: form.elements.steamdbRegion.checked,
       regionRestricted: form.elements.regionRestricted.checked,
       countryIds: ids('countryIds'),
       description: form.elements.description.value,
@@ -2377,6 +3424,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
         gamekey: bundle.gamekey || state.gamekey || null,
         keyindex: null,
         steamAppId: null,
+        steamPackageId: null,
         keyType: rowPlatform(row),
         revealed: Boolean(revealedKey),
         unavailable,
@@ -2432,6 +3480,10 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       gamekey,
       keyindex: tpk.keyindex != null ? tpk.keyindex : 0,
       steamAppId: HSG.normalizeAppId(tpk.steam_app_id),
+      // Het Steam-pakket (de "sub") waar deze key bij hoort. Niet altijd
+      // aanwezig, maar als hij er is weet de SteamDB-regiocontrole precies
+      // welke pagina hij moet lezen.
+      steamPackageId: HSG.normalizeAppId(tpk.steam_package_id),
       keyType: 'steam',
       revealed: Boolean(tpk.redeemed_key_val),
       unavailable: false,
@@ -2655,6 +3707,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
         gamekey: game.gamekey || 'dom',
         keyindex: game.keyindex != null ? game.keyindex : 0,
         steamAppId: game.steamAppId,
+        steamPackageId: game.steamPackageId != null ? game.steamPackageId : null,
         disallowedCountries: game.disallowedCountries || [],
         exclusiveCountries: game.exclusiveCountries || [],
         expiry: game.expiry || null,
@@ -2825,7 +3878,8 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
         const order = await fetchOrder(probeKey);
         const tpks = (order && order.tpkd_dict && order.tpkd_dict.all_tpks) || [];
         apiOk = true;
-        apiDetail = `${tpks.length} keys in die order, waarvan ${tpks.filter(HSG.isUsableTpk).length} bruikbare Steam-keys`;
+        const withSub = tpks.filter((tpk) => HSG.normalizeAppId(tpk.steam_package_id)).length;
+        apiDetail = `${tpks.length} keys in die order, waarvan ${tpks.filter(HSG.isUsableTpk).length} bruikbare Steam-keys; ${withSub} met een Steam-pakket-id (voor de SteamDB-regiocontrole)`;
       }
     } catch (error) {
       apiDetail = String(error.message || error);
@@ -3029,46 +4083,54 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
   }
 
   /**
-   * De regio. Op SteamGifts betekent aangevinkt "mag meedoen"; Humble zegt het
-   * omgekeerd met `disallowed_countries`, en met `exclusive_countries` zelfs
-   * "alleen hier". Zie HSG.allowedCountries.
+   * De regio. Op SteamGifts betekent aangevinkt "mag meedoen". Welke bron dat
+   * bepaalt beslist `HSG.regionPlan`: verse SteamDB-pakketdata is leidend,
+   * daarna Humble's `disallowed_countries`/`exclusive_countries`, daarna je
+   * vaste instelling. Zie HSG.allowedCountries voor de omkering.
    */
   async function fillRegion(item, settings) {
-    const notes = [];
-    const blocked = (item.disallowedCountries || []).filter(Boolean);
-    const exclusive = (item.exclusiveCountries || []).filter(Boolean);
-    const fromHumble =
-      settings.regionFromHumble !== false && (blocked.length > 0 || exclusive.length > 0);
+    const plan = HSG.regionPlan(item, settings);
+    const notes = plan.notes.slice();
 
-    if (!fromHumble) {
-      if (!selectOption(SG.regionRestricted, settings.regionRestricted ? '1' : '0')) {
+    if (plan.mode === 'off' || plan.mode === 'none') {
+      if (!selectOption(SG.regionRestricted, '0')) notes.push('Regio-optie niet gevonden.');
+      return notes;
+    }
+
+    if (plan.mode === 'fixed') {
+      if (!selectOption(SG.regionRestricted, '1')) {
         notes.push('Regio-optie niet gevonden.');
+        return notes;
       }
-      if (settings.regionRestricted) {
-        const list = await HSG.waitForElement(SG.countryList, { timeout: 5000 }).catch(() => null);
-        if (!list) notes.push('Landenlijst niet gevonden.');
-        else {
-          const byCode = new Map(
-            HSG.readItemList(list, 0)
-              .filter((entry) => entry.code)
-              .map((entry) => [entry.code.toUpperCase(), entry.id])
-          );
-          const wanted = (settings.countryIds || [])
-            .map((code) => byCode.get(String(code).toUpperCase()))
-            .filter(Boolean);
-          HSG.syncItemList(list, wanted, 0);
-          if (wanted.length !== (settings.countryIds || []).length) {
-            notes.push('Niet alle landcodes uit je instellingen zijn herkend.');
-          }
-        }
+      const list = await HSG.waitForElement(SG.countryList, { timeout: 5000 }).catch(() => null);
+      if (!list) {
+        notes.push('Landenlijst niet gevonden.');
+        return notes;
       }
-      if (blocked.length || exclusive.length) {
-        notes.push(
-          `Let op: Humble heeft regio-informatie voor dit spel, maar "regio overnemen van Humble" staat uit.`
-        );
+      const byCode = new Map(
+        HSG.readItemList(list, 0)
+          .filter((entry) => entry.code)
+          .map((entry) => [entry.code.toUpperCase(), entry.id])
+      );
+      const wanted = (settings.countryIds || [])
+        .map((code) => byCode.get(String(code).toUpperCase()))
+        .filter(Boolean);
+      HSG.syncItemList(list, wanted, 0);
+      if (wanted.length !== (settings.countryIds || []).length) {
+        notes.push('Niet alle landcodes uit je instellingen zijn herkend.');
       }
       return notes;
     }
+
+    // 'steamdb' of 'humble': de bronlijsten omkeren naar de toestemmingslijst.
+    const source =
+      plan.mode === 'steamdb'
+        ? `SteamDB${
+            item.steamdb && (item.steamdb.subIds || []).length
+              ? ` (pakket ${item.steamdb.subIds.join(', ')})`
+              : ''
+          }`
+        : 'Humble';
 
     if (!selectOption(SG.regionRestricted, '1')) {
       notes.push('Regio-optie niet gevonden — zet de restrictie zelf aan.');
@@ -3083,8 +4145,8 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     const available = HSG.readItemList(list, 0);
     const { allowedIds, blockedCodes, unknownCodes, unmapped } = HSG.allowedCountries(
       available,
-      blocked,
-      exclusive
+      plan.disallowed,
+      plan.exclusive || []
     );
 
     // Sluit dit niets uit, dan zou "beperken" alles toestaan — misleidender dan
@@ -3092,16 +4154,16 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     if (blockedCodes.length === 0) {
       selectOption(SG.regionRestricted, '0');
       notes.push(
-        `Humble noemt ${blocked.length + exclusive.length} landen, maar geen daarvan komt voor in de lijst van SteamGifts. Regio-restrictie uit gelaten — stel dit zelf in.`
+        `${source} noemt landen, maar geen daarvan komt voor in de lijst van SteamGifts. Regio-restrictie uit gelaten — stel dit zelf in.`
       );
       return notes;
     }
 
     HSG.syncItemList(list, allowedIds, 0);
     notes.push(
-      exclusive.length
-        ? `Humble geeft deze key alleen vrij in ${exclusive.length} landen; ${allowedIds.length} daarvan staan aangevinkt (aangevinkt = mag meedoen).`
-        : `Regio overgenomen van Humble: ${allowedIds.length} landen aangevinkt en dus toegestaan, ${blockedCodes.length} uitgezet.`
+      plan.exclusive && plan.exclusive.length
+        ? `${source}: deze key werkt alleen in ${plan.exclusive.length} landen; ${allowedIds.length} daarvan staan aangevinkt (aangevinkt = mag meedoen).`
+        : `Regio overgenomen van ${source}: ${allowedIds.length} landen aangevinkt en dus toegestaan, ${blockedCodes.length} uitgezet.`
     );
     if (unknownCodes.length) {
       notes.push(`${unknownCodes.length} landcode(s) kent SteamGifts niet (${unknownCodes.slice(0, 6).join(', ')}).`);
@@ -3110,6 +4172,26 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       notes.push(`${unmapped.length} land(en) zonder leesbare landcode.`);
     }
     return notes;
+  }
+
+  /**
+   * De SteamDB-regiocontrole draait in een ander tabblad en kan nog bezig zijn
+   * als dit formulier al opent. Even wachten is beter dan invullen met data
+   * die tien seconden later alsnog binnenkomt.
+   */
+  async function waitForSteamdb(item, settings) {
+    if (settings.steamdbRegion === false) return item;
+    let current = item;
+    for (let round = 0; round < 10; round += 1) {
+      if (!current.steamdb || current.steamdb.status !== 'pending') break;
+      if (round === 0) {
+        HSG.panel.notice(`${item.humanName} — wachten op de SteamDB-regiocontrole…`, 'ok');
+      }
+      await HSG.sleep(2000);
+      const queue = HSG.store.getQueue();
+      current = queue.items.find((entry) => entry.id === item.id) || current;
+    }
+    return current;
   }
 
   async function fillForm(item, key, settings, resolved) {
@@ -3285,7 +4367,8 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
 
     let notes;
     try {
-      notes = await fillForm(item, key, settings, resolved.match);
+      const freshItem = await waitForSteamdb(item, settings);
+      notes = await fillForm(freshItem, key, settings, resolved.match);
     } catch (error) {
       fail(item.id, String(error.message || error));
       return;
@@ -3446,6 +4529,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     try {
       if (location.host === 'www.humblebundle.com') HSG.humble.boot();
       else if (location.host === 'www.steamgifts.com') HSG.steamgifts.boot();
+      else if (/(^|\.)steamdb\.info$/.test(location.host)) HSG.steamdb.boot();
     } catch (error) {
       console.error('[Humble → SteamGifts]', HSG.redact(String(error && error.stack) || error));
     }

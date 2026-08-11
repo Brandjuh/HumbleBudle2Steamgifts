@@ -12,7 +12,9 @@
 // @match        https://www.humblebundle.com/subscription/*
 // @match        https://www.steamgifts.com/giveaways/new*
 // @match        https://www.steamgifts.com/giveaway/*
+// @match        https://steamdb.info/*
 // @run-at       document-idle
+// @grant        window.close
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue

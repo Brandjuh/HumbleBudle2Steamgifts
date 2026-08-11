@@ -421,3 +421,289 @@ test('storeExpiry en readExpiry overleven de reis door JSON', () => {
   assert.equal(back.source, 'field');
   assert.equal(HSG.readExpiry(null), null);
 });
+
+// --- SteamDB-pakketdata -------------------------------------------------------
+
+test('splitCountryList splitst op spaties én komma\'s en houdt alleen landcodes over', () => {
+  assert.deepEqual(HSG.splitCountryList('RU BY KZ'), ['RU', 'BY', 'KZ']);
+  assert.deepEqual(HSG.splitCountryList('RU,BY'), ['RU', 'BY']);
+  assert.deepEqual(HSG.splitCountryList('ru, by  kz'), ['RU', 'BY', 'KZ']);
+  // Volledige landnamen (na de <hr> in SteamDB's cel) vallen af.
+  assert.deepEqual(HSG.splitCountryList('RU Russian Federation'), ['RU']);
+  assert.deepEqual(HSG.splitCountryList(''), []);
+  assert.deepEqual(HSG.splitCountryList(null), []);
+});
+
+test('steamdbFieldsFromRows herkent de veldnamen ongeacht hoofdletters en opmaak', () => {
+  const fields = HSG.steamdbFieldsFromRows([
+    { label: 'PurchaseRestrictedCountries', value: 'RU BY' },
+    { label: 'AllowPurchaseFromRestrictedCountries', value: 'No' },
+    { label: 'onlyallowrunincountries', value: 'RU AM AZ' },
+    { label: 'ReleaseState', value: 'released' }, // onbekend veld: negeren
+  ]);
+  assert.deepEqual(fields.purchaserestrictedcountries, ['RU', 'BY']);
+  assert.equal(fields.allowpurchasefromrestrictedcountries, false);
+  assert.deepEqual(fields.onlyallowrunincountries, ['RU', 'AM', 'AZ']);
+  assert.equal('releasestate' in fields, false);
+
+  assert.equal(
+    HSG.steamdbFieldsFromRows([{ label: 'OnlyAllowRestrictedCountries', value: 'Yes' }])
+      .onlyallowrestrictedcountries,
+    true
+  );
+});
+
+test('steamdbRestrictions: vlag uit maakt de lijst een zwarte lijst', () => {
+  const result = HSG.steamdbRestrictions({
+    purchaserestrictedcountries: ['RU', 'BY'],
+    allowpurchasefromrestrictedcountries: false,
+  });
+  assert.deepEqual(result.disallowed.sort(), ['BY', 'RU']);
+  assert.equal(result.exclusive, null);
+});
+
+test('steamdbRestrictions: vlag aan maakt de lijst een witte lijst', () => {
+  // Geverifieerd geval: het Duitse low-violence-pakket (sub 178) heeft beide
+  // paren als witte lijst met alleen DE.
+  const result = HSG.steamdbRestrictions({
+    purchaserestrictedcountries: ['DE'],
+    allowpurchasefromrestrictedcountries: true,
+    restrictedcountries: ['DE'],
+    onlyallowrestrictedcountries: true,
+  });
+  assert.deepEqual(result.disallowed, []);
+  assert.deepEqual(result.exclusive, ['DE']);
+});
+
+test('steamdbRestrictions neemt de run-lock mee als witte lijst', () => {
+  const result = HSG.steamdbRestrictions({
+    purchaserestrictedcountries: ['TR'],
+    allowpurchasefromrestrictedcountries: false,
+    onlyallowrunincountries: ['RU', 'AM'],
+  });
+  assert.deepEqual(result.disallowed, ['TR']);
+  assert.deepEqual(result.exclusive.sort(), ['AM', 'RU']);
+});
+
+test('steamdbRestrictions: tegenstrijdige witte lijsten leveren een lege (níet null) lijst', () => {
+  // Lege witte lijst betekent "nergens toegestaan" — dat moet te onderscheiden
+  // zijn van "geen witte lijst", anders faalt dit open.
+  const result = HSG.steamdbRestrictions({
+    restrictedcountries: ['DE'],
+    onlyallowrestrictedcountries: true,
+    onlyallowrunincountries: ['RU'],
+  });
+  assert.deepEqual(result.exclusive, []);
+});
+
+test('steamdbRestrictions zonder velden betekent: geen beperking', () => {
+  const result = HSG.steamdbRestrictions({});
+  assert.deepEqual(result.disallowed, []);
+  assert.equal(result.exclusive, null);
+});
+
+test('combineRestrictions telt zwarte lijsten op en snijdt witte lijsten', () => {
+  const combined = HSG.combineRestrictions([
+    { disallowed: ['RU'], exclusive: null },
+    { disallowed: ['CN'], exclusive: ['NL', 'BE', 'DE'] },
+    { disallowed: [], exclusive: ['NL', 'DE'] },
+  ]);
+  assert.deepEqual(combined.disallowed.sort(), ['CN', 'RU']);
+  assert.deepEqual(combined.exclusive.sort(), ['DE', 'NL']);
+
+  const open = HSG.combineRestrictions([{ disallowed: [], exclusive: null }]);
+  assert.equal(open.exclusive, null);
+});
+
+test('pickSteamdbSubs: een pakket met "Humble" in de naam wint altijd', () => {
+  const picked = HSG.pickSteamdbSubs([
+    { subId: '1', name: 'Game Retail', cdKey: true, buyRestrict: true },
+    { subId: '2', name: 'Game - Humble Monthly Pack', cdKey: true, buyRestrict: false },
+    { subId: '3', name: 'Game Store Package', cdKey: false, buyRestrict: false },
+  ]);
+  assert.deepEqual(picked, { subIds: ['2'], reason: 'humble' });
+});
+
+test('pickSteamdbSubs: zonder Humble-naam gelden alleen key-pakketten', () => {
+  assert.deepEqual(HSG.pickSteamdbSubs([{ subId: '9', name: 'Store', cdKey: false }]), {
+    subIds: [],
+    reason: 'none',
+  });
+  assert.deepEqual(
+    HSG.pickSteamdbSubs([{ subId: '9', name: 'Retail', cdKey: true, buyRestrict: false }]),
+    { subIds: ['9'], reason: 'single' }
+  );
+  // Tot en met vier kandidaten worden ze allemaal bekeken.
+  const four = ['1', '2', '3', '4'].map((subId) => ({ subId, name: 'Retail', cdKey: true }));
+  assert.deepEqual(HSG.pickSteamdbSubs(four).reason, 'all');
+});
+
+test('pickSteamdbSubs: bij veel pakketten beslist SteamDB\'s eigen restrictiemarkering', () => {
+  const many = ['1', '2', '3', '4', '5', '6'].map((subId) => ({
+    subId,
+    name: `Retail ${subId}`,
+    cdKey: true,
+    buyRestrict: subId === '5',
+  }));
+  assert.deepEqual(HSG.pickSteamdbSubs(many), { subIds: ['5'], reason: 'marked' });
+
+  const unmarked = many.map((c) => ({ ...c, buyRestrict: false }));
+  assert.deepEqual(HSG.pickSteamdbSubs(unmarked), { subIds: [], reason: 'unrestricted' });
+});
+
+test('resolveSteamdbCandidates volgt één pakket, maar weigert te gokken bij tegenspraak', () => {
+  const restricted = { disallowed: ['RU'], exclusive: null };
+  const open = { disallowed: [], exclusive: null };
+
+  const single = HSG.resolveSteamdbCandidates([{ subId: '1', stale: false, restrictions: restricted }], 'direct');
+  assert.equal(single.status, 'ok');
+  assert.deepEqual(single.disallowed, ['RU']);
+
+  // Meerdere kandidaten met dezelfde uitkomst: prima.
+  const agree = HSG.resolveSteamdbCandidates(
+    [
+      { subId: '1', stale: false, restrictions: restricted },
+      { subId: '2', stale: false, restrictions: { disallowed: ['RU'], exclusive: null } },
+    ],
+    'all'
+  );
+  assert.equal(agree.status, 'ok');
+
+  // Een wereldwijd retail-pakket naast een regiovariant: níet de doorsnede
+  // nemen — dan zou een wereldwijde key opgesloten raken in die regio.
+  const disagree = HSG.resolveSteamdbCandidates(
+    [
+      { subId: '1', stale: false, restrictions: open },
+      { subId: '2', stale: false, restrictions: { disallowed: [], exclusive: ['TR'] } },
+    ],
+    'all'
+  );
+  assert.equal(disagree.status, 'ambiguous');
+
+  // Bij een duidelijk Humble-pakket mag samvoegen wél (strengste uitkomst).
+  const humble = HSG.resolveSteamdbCandidates(
+    [
+      { subId: '1', stale: false, restrictions: restricted },
+      { subId: '2', stale: false, restrictions: { disallowed: ['CN'], exclusive: null } },
+    ],
+    'humble'
+  );
+  assert.equal(humble.status, 'ok');
+  assert.deepEqual(humble.disallowed.sort(), ['CN', 'RU']);
+});
+
+test('resolveSteamdbCandidates: verouderde pakketdata is geen basis voor een uitspraak', () => {
+  const result = HSG.resolveSteamdbCandidates(
+    [{ subId: '1', stale: true, restrictions: { disallowed: [], exclusive: null } }],
+    'direct'
+  );
+  assert.equal(result.status, 'stale');
+  assert.equal(HSG.resolveSteamdbCandidates([], 'direct').status, 'nosub');
+});
+
+const planItem = (patch) => ({
+  disallowedCountries: [],
+  exclusiveCountries: [],
+  steamdb: null,
+  ...patch,
+});
+const planSettings = (patch) => ({
+  regionFromHumble: true,
+  steamdbRegion: true,
+  regionRestricted: false,
+  countryIds: [],
+  ...patch,
+});
+
+test('regionPlan: verse SteamDB-data is leidend, ook boven Humble', () => {
+  const plan = HSG.regionPlan(
+    planItem({
+      disallowedCountries: ['DE'],
+      steamdb: { status: 'ok', disallowed: ['RU', 'BY'], exclusive: null, subIds: ['178662'] },
+    }),
+    planSettings()
+  );
+  assert.equal(plan.mode, 'steamdb');
+  assert.deepEqual(plan.disallowed.sort(), ['BY', 'RU']);
+  // Het verschil met Humble wordt wel gemeld.
+  assert.equal(plan.notes.some((note) => /verschillen/.test(note)), true);
+});
+
+test('regionPlan: SteamDB "geen beperking" wint van Humble\'s waarschuwing', () => {
+  const plan = HSG.regionPlan(
+    planItem({
+      disallowedCountries: ['RU', 'BY'],
+      steamdb: { status: 'ok', disallowed: [], exclusive: null, subIds: ['1'] },
+    }),
+    planSettings()
+  );
+  assert.equal(plan.mode, 'none');
+  assert.equal(plan.notes.some((note) => /SteamDB is leidend/.test(note)), true);
+});
+
+test('regionPlan valt terug op Humble als SteamDB niets bruikbaars heeft', () => {
+  for (const status of ['pending', 'stale', 'nosub', 'ambiguous', 'error']) {
+    const plan = HSG.regionPlan(
+      planItem({ disallowedCountries: ['RU'], steamdb: { status, subIds: [] } }),
+      planSettings()
+    );
+    assert.equal(plan.mode, 'humble', status);
+    assert.deepEqual(plan.disallowed, ['RU']);
+  }
+});
+
+test('regionPlan: tegenstrijdige SteamDB-witte-lijst valt terug op Humble', () => {
+  const plan = HSG.regionPlan(
+    planItem({
+      disallowedCountries: ['RU'],
+      steamdb: { status: 'ok', disallowed: [], exclusive: [], subIds: ['1'] },
+    }),
+    planSettings()
+  );
+  assert.equal(plan.mode, 'humble');
+  assert.equal(plan.notes.some((note) => /tegen/.test(note)), true);
+});
+
+test('regionPlan: zonder data geldt de vaste instelling', () => {
+  assert.equal(HSG.regionPlan(planItem(), planSettings()).mode, 'off');
+  assert.equal(
+    HSG.regionPlan(planItem(), planSettings({ regionRestricted: true })).mode,
+    'fixed'
+  );
+  // SteamDB uitgezet in de instellingen: alsof er geen SteamDB-data is.
+  const plan = HSG.regionPlan(
+    planItem({
+      disallowedCountries: ['RU'],
+      steamdb: { status: 'ok', disallowed: [], exclusive: null, subIds: ['1'] },
+    }),
+    planSettings({ steamdbRegion: false })
+  );
+  assert.equal(plan.mode, 'humble');
+});
+
+test('regionPlan: automatisch overnemen uit betekent vaste instelling, met melding', () => {
+  const plan = HSG.regionPlan(
+    planItem({ disallowedCountries: ['RU'] }),
+    planSettings({ regionFromHumble: false })
+  );
+  assert.equal(plan.mode, 'off');
+  assert.equal(plan.notes.length, 1);
+});
+
+test('describeSteamdbStatus vat de uitkomst kort samen voor het paneel', () => {
+  assert.match(
+    HSG.describeSteamdbStatus({ status: 'ok', disallowed: ['RU', 'BY'], exclusive: null }),
+    /2 landen geblokkeerd/
+  );
+  assert.match(
+    HSG.describeSteamdbStatus({ status: 'ok', disallowed: [], exclusive: ['DE'] }),
+    /alleen 1 land/
+  );
+  assert.match(
+    HSG.describeSteamdbStatus({ status: 'ok', disallowed: [], exclusive: null }),
+    /geen beperking/
+  );
+  assert.match(HSG.describeSteamdbStatus({ status: 'ambiguous' }), /meerdere pakketten/);
+  assert.equal(HSG.describeSteamdbStatus({ status: 'nodata' }), null);
+  assert.equal(HSG.describeSteamdbStatus(null), null);
+});
