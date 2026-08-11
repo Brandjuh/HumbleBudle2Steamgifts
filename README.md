@@ -123,10 +123,12 @@ uitkomst **leidend**:
 **Hoe het pakket gevonden wordt.** Humble's order-API geeft vaak direct het
 pakketnummer mee (`steam_package_id`); dan is er niets te raden. Ontbreekt dat,
 dan wordt de pakketlijst van het spel bekeken: een pakket met "Humble" in de
-naam wint, en bij meerdere kandidaten wordt SteamDB alleen gevolgd als alle
-kandidaten hetzelfde zeggen. Anders zou een wereldwijde key opgesloten kunnen
-raken in de regio van een lokale winkelvariant — dan liever Humble's gegevens,
-met een melding erbij.
+naam wint, tot vier kandidaten worden ze allemaal gelezen en alleen gevolgd
+als ze hetzelfde zeggen, en bij meer dan vier wordt helemaal niet gegokt.
+Anders zou een wereldwijde key opgesloten kunnen raken in de regio van een
+lokale winkelvariant — dan liever Humble's gegevens, met een melding erbij.
+Ook een pagina die niet herkenbaar als pakketpagina terugkomt telt nooit als
+"geen beperking": alles wat onzeker is valt terug op Humble.
 
 **Hoe er gelezen wordt.** SteamDB heeft geen API en staat scrapen niet toe.
 Het script leest daarom in je eigen browser: bij het toevoegen aan de wachtrij

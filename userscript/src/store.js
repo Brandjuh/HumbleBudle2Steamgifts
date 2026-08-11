@@ -21,6 +21,7 @@
     SECRETS: 'secrets',
     STEAMDB_CACHE: 'steamdbCache',
     STEAMDB_JOBS: 'steamdbJobs',
+    STEAMDB_RESULTS: 'steamdbResults',
   };
 
   /** Hoe lang SteamDB-pakketdata houdbaar is. Restricties wijzigen zelden. */
@@ -40,10 +41,15 @@
 
   const write = (name, value) => GM_setValue(name, JSON.stringify(value));
 
-  /** Een cache-item alleen teruggeven zolang het houdbaar is. */
+  /**
+   * Een cache-item alleen teruggeven zolang het houdbaar is. Alleen een écht
+   * geslaagde lezing is twee weken houdbaar; verouderd gemarkeerde data en
+   * lege pakketlijsten kunnen bijtrekken en gelden maar een dag.
+   */
   const freshSteamdbEntry = (entry) => {
     if (!entry || !entry.fetchedAt) return null;
-    const ttl = entry.status === 'ok' ? STEAMDB_TTL_OK_MS : STEAMDB_TTL_BAD_MS;
+    const solid = entry.status === 'ok' && !entry.stale && !entry.noPackages;
+    const ttl = solid ? STEAMDB_TTL_OK_MS : STEAMDB_TTL_BAD_MS;
     return Date.now() - entry.fetchedAt < ttl ? entry : null;
   };
 
@@ -200,6 +206,38 @@
 
     setSteamdbJobs(record) {
       write(KEYS.STEAMDB_JOBS, record ? { ...record, updatedAt: Date.now() } : null);
+    },
+
+    /**
+     * De regio-uitspraken per wachtrij-item, apart van de wachtrij zelf. Het
+     * werktabblad schrijft hier; de wachtrij wordt alleen door de Humble- en
+     * SteamGifts-tabs beschreven. Zouden ze allebei in de wachtrij schrijven,
+     * dan kan het werktabblad een net gezette status (ingevuld/klaar)
+     * terugdraaien — lees-wijzig-schrijf zonder slot.
+     */
+    getSteamdbResult(itemId) {
+      return read(KEYS.STEAMDB_RESULTS, {})[itemId] || null;
+    },
+
+    putSteamdbResult(itemId, result) {
+      const results = read(KEYS.STEAMDB_RESULTS, {});
+      results[itemId] = result;
+      write(KEYS.STEAMDB_RESULTS, results);
+    },
+
+    /** Uitspraken opruimen van items die niet meer in de wachtrij staan. */
+    pruneSteamdbResults(validIds) {
+      const keep = new Set(validIds || []);
+      const results = read(KEYS.STEAMDB_RESULTS, {});
+      const pruned = {};
+      for (const [id, value] of Object.entries(results)) {
+        if (keep.has(id)) pruned[id] = value;
+      }
+      write(KEYS.STEAMDB_RESULTS, pruned);
+    },
+
+    clearSteamdbResults() {
+      write(KEYS.STEAMDB_RESULTS, {});
     },
 
     // --- meeluisteren ---------------------------------------------------------

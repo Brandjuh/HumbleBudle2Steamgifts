@@ -213,6 +213,7 @@
     HSG.store.onChange(HSG.store.NAMES.QUEUE, () => render());
     HSG.store.onChange(HSG.store.NAMES.CATALOG, () => render());
     HSG.store.onChange(HSG.store.NAMES.STEAMDB_JOBS, () => render());
+    HSG.store.onChange(HSG.store.NAMES.STEAMDB_RESULTS, () => render());
 
     render();
     return ui;
@@ -268,7 +269,9 @@
       const bits = [];
       if (item.sgGameName) bits.push(`SteamGifts: ${item.sgGameName}`);
       else if (item.steamAppId) bits.push(`appid ${item.steamAppId}`);
-      const steamdbLabel = HSG.describeSteamdbStatus(item.steamdb);
+      const steamdbLabel = HSG.describeSteamdbStatus(
+        HSG.store.getSteamdbResult(item.id) || item.steamdb
+      );
       if (steamdbLabel) bits.push(steamdbLabel);
       if (item.error) bits.push(item.error);
       if (item.giveawayUrl) bits.push(item.giveawayUrl);
@@ -325,6 +328,10 @@
     }
     node.hidden = false;
     node.textContent = '';
+    const retry = () =>
+      toolButton('Opnieuw proberen', () => {
+        if (!HSG.steamdb.retryLookups()) throw new Error('Geen openstaande controles.');
+      });
     if (jobs.status === 'challenge') {
       node.append(
         el(
@@ -332,9 +339,16 @@
           null,
           'SteamDB vraagt om een controle voordat de regiocheck verder kan. Los die op in het SteamDB-tabblad (of open steamdb.info) en probeer opnieuw. '
         ),
-        toolButton('Opnieuw proberen', () => {
-          if (!HSG.steamdb.retryLookups()) throw new Error('Geen openstaande controles.');
-        })
+        retry()
+      );
+    } else if (jobs.stalled) {
+      node.append(
+        el(
+          'span',
+          null,
+          `De SteamDB-regiocontrole ligt stil (${jobs.open} spel${jobs.open === 1 ? '' : 'len'} open) — het werktabblad is waarschijnlijk gesloten. `
+        ),
+        retry()
       );
     } else {
       node.append(
@@ -611,6 +625,7 @@
         return;
       }
       HSG.store.clearSteamdbCache();
+      HSG.store.clearSteamdbResults();
       HSG.store.setSteamdbJobs(null);
       notice('SteamDB-cache gewist.', 'ok');
     },

@@ -538,17 +538,18 @@ test('pickSteamdbSubs: zonder Humble-naam gelden alleen key-pakketten', () => {
   assert.deepEqual(HSG.pickSteamdbSubs(four).reason, 'all');
 });
 
-test('pickSteamdbSubs: bij veel pakketten beslist SteamDB\'s eigen restrictiemarkering', () => {
+test('pickSteamdbSubs: bij meer dan vier pakketten wordt niet gegokt', () => {
+  // Een eerdere versie koos hier op de "(Buy Restrict)"-markering, maar die
+  // faalt naar twee kanten: geen markering bewijst geen "onbeperkt", en alleen
+  // gemarkeerde pakketten lezen sluit een wereldwijde key op in een
+  // regiovariant. Geen uitspraak is dan het enige eerlijke antwoord.
   const many = ['1', '2', '3', '4', '5', '6'].map((subId) => ({
     subId,
     name: `Retail ${subId}`,
     cdKey: true,
     buyRestrict: subId === '5',
   }));
-  assert.deepEqual(HSG.pickSteamdbSubs(many), { subIds: ['5'], reason: 'marked' });
-
-  const unmarked = many.map((c) => ({ ...c, buyRestrict: false }));
-  assert.deepEqual(HSG.pickSteamdbSubs(unmarked), { subIds: [], reason: 'unrestricted' });
+  assert.deepEqual(HSG.pickSteamdbSubs(many), { subIds: [], reason: 'many' });
 });
 
 test('resolveSteamdbCandidates volgt één pakket, maar weigert te gokken bij tegenspraak', () => {
@@ -599,6 +600,42 @@ test('resolveSteamdbCandidates: verouderde pakketdata is geen basis voor een uit
   );
   assert.equal(result.status, 'stale');
   assert.equal(HSG.resolveSteamdbCandidates([], 'direct').status, 'nosub');
+});
+
+test('resolveSteamdbCandidates: een onvolledig beeld telt niet als eensgezindheid', () => {
+  // Drie kandidaten aangewezen, maar één pagina was onleesbaar of weg: dat de
+  // twee gelezen pakketten hetzelfde zeggen bewijst niets over de derde.
+  const open = { disallowed: [], exclusive: null };
+  const partial = HSG.resolveSteamdbCandidates(
+    [
+      { subId: '1', stale: false, restrictions: open },
+      { subId: '2', stale: false, restrictions: open },
+    ],
+    'all',
+    3
+  );
+  assert.equal(partial.status, 'ambiguous');
+
+  // Zelfs één overgebleven kandidaat is bij 'all' geen vrijbrief: de weggevallen
+  // kandidaten kunnen precies de regiovariant zijn — of juist niet.
+  const lone = HSG.resolveSteamdbCandidates(
+    [{ subId: '2', stale: false, restrictions: { disallowed: [], exclusive: ['TR'] } }],
+    'all',
+    3
+  );
+  assert.equal(lone.status, 'ambiguous');
+
+  // Compleet beeld en eensluidend: dan wél.
+  const complete = HSG.resolveSteamdbCandidates(
+    [
+      { subId: '1', stale: false, restrictions: open },
+      { subId: '2', stale: false, restrictions: open },
+      { subId: '3', stale: false, restrictions: open },
+    ],
+    'all',
+    3
+  );
+  assert.equal(complete.status, 'ok');
 });
 
 const planItem = (patch) => ({

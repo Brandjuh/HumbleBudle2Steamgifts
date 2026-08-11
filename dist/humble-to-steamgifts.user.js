@@ -337,6 +337,15 @@
       /** SteamDB's eigen markering dat een pakket een aankooprestrictie heeft. */
       buyRestrictPattern: /buy restrict/i,
       /**
+       * Bewijs dat we echt naar een pakketpagina kijken. Zonder dit bewijs is
+       * "geen restrictierijen gevonden" niets waard: een tussenpagina of een
+       * herontworpen pagina zou dan als "geen beperking" gelden — en juist die
+       * uitkomst overschrijft Humble.
+       */
+      subPageProof: /(apps|depots) in this package|do you have a key for this package|this package may be outdated|cross region trading and gifting/i,
+      /** Zelfde bewijs voor de pakketlijst van een app. */
+      appSubsProof: /packages that include this app|not included in any package known to us/i,
+      /**
        * "The data for this package may be outdated, as our bot can no longer
        * access the package info." — dan is "geen restrictierij" geen bewijs.
        */
@@ -955,13 +964,17 @@
   /**
    * Welke pakketten van een spel zijn het bekijken waard? Kandidaten komen uit
    * de pakketlijst op SteamDB: alleen pakketten waar keys tegen aangemaakt
-   * worden tellen (`cdKey`), en `buyRestrict` is SteamDB's eigen markering dat
-   * er een aankooprestrictie op zit.
+   * worden tellen (`cdKey`).
    *
    * Een Humble-key hoort meestal bij een generiek retail-pakket, soms bij een
    * pakket met "Humble" in de naam. Regiovarianten ("… Turkey Retail Keys")
    * staan er ook tussen, en dáár mag de uitkomst niet van afhangen — zie
-   * `resolveSteamdbCandidates`.
+   * `resolveSteamdbCandidates`. Bij meer dan vier kandidaten wordt daarom
+   * helemaal niet gegokt: dan is het antwoord alleen te bewijzen door álles te
+   * lezen, en dat is SteamDB te veel gevraagd. (Een eerdere versie koos hier op
+   * SteamDB's "(Buy Restrict)"-markering, maar die faalt naar twee kanten:
+   * geen markering is geen bewijs van "onbeperkt", en alleen de gemarkeerde
+   * pakketten lezen sluit een wereldwijde key op in een regiovariant.)
    */
   HSG.pickSteamdbSubs = function (candidates) {
     const keySubs = (candidates || []).filter((c) => c && c.subId && c.cdKey);
@@ -973,23 +986,24 @@
     }
     if (keySubs.length === 1) return { subIds: [keySubs[0].subId], reason: 'single' };
     if (keySubs.length <= 4) return { subIds: keySubs.map((c) => c.subId), reason: 'all' };
-
-    const marked = keySubs.filter((c) => c.buyRestrict);
-    if (marked.length === 0) return { subIds: [], reason: 'unrestricted' };
-    return { subIds: marked.slice(0, 4).map((c) => c.subId), reason: 'marked' };
+    return { subIds: [], reason: 'many' };
   };
 
   /**
    * De opgehaalde pakketten naar één uitspraak. Bij een pakket dat duidelijk
-   * bij Humble hoort volgen we dat pakket; bij meerdere kandidaten alleen als
-   * het antwoord niet van de keuze afhangt. Anders zouden we een wereldwijde
-   * key kunnen opsluiten in de regio van een lokale winkelvariant — of
-   * omgekeerd.
+   * bij Humble hoort (of het enige key-pakket is) volgen we dat pakket; bij
+   * meerdere kandidaten alleen als ze állemaal gelezen zijn én hetzelfde
+   * zeggen. Anders zouden we een wereldwijde key kunnen opsluiten in de regio
+   * van een lokale winkelvariant — of omgekeerd.
    *
    * @param {{subId: string, stale: boolean, restrictions: object}[]} fetched
+   * @param {string} reason uit `pickSteamdbSubs` ('direct' voor een
+   *   rechtstreeks bekend pakketnummer)
+   * @param {number} [expected] hoeveel kandidaten er gelezen hadden moeten
+   *   worden; minder gelukt = geen volledig beeld = geen uitspraak
    * @returns {{status: 'ok'|'stale'|'ambiguous'|'nosub', disallowed?, exclusive?, subIds: string[]}}
    */
-  HSG.resolveSteamdbCandidates = function (fetched, reason) {
+  HSG.resolveSteamdbCandidates = function (fetched, reason, expected) {
     const usable = (fetched || []).filter(Boolean);
     const subIds = usable.map((f) => f.subId);
     if (usable.length === 0) return { status: 'nosub', subIds: [] };
@@ -997,10 +1011,14 @@
     if (usable.some((f) => f.stale)) return { status: 'stale', subIds };
 
     const restrictions = usable.map((f) => f.restrictions || { disallowed: [], exclusive: null });
-    if (reason === 'humble' || usable.length === 1) {
+    const trusted = reason === 'direct' || reason === 'humble' || reason === 'single';
+    if (trusted) {
       return { status: 'ok', ...HSG.combineRestrictions(restrictions), subIds };
     }
 
+    // Meerdere gelijkwaardige kandidaten: alleen een uitspraak als het beeld
+    // compleet is en eensluidend.
+    if (expected != null && usable.length < expected) return { status: 'ambiguous', subIds };
     const signature = (r) =>
       JSON.stringify({
         d: (r.disallowed || []).slice().sort(),
@@ -1084,9 +1102,10 @@
         pending: 'controle nog niet afgerond',
         stale: 'SteamDB meldt dat de pakketdata verouderd is',
         nosub: 'pakket niet gevonden op SteamDB',
-        ambiguous: 'meerdere pakketten mogelijk en ze spreken elkaar tegen',
+        ambiguous: 'meerdere pakketten mogelijk — geen eensluidend antwoord',
         challenge: 'SteamDB vroeg om een Cloudflare-controle',
         error: 'controle mislukt',
+        unparsed: 'pagina niet herkend',
         nodata: 'geen Steam-appid bekend',
       }[sdb.status] || sdb.status;
       notes.push(
@@ -1111,6 +1130,10 @@
     switch (sdb.status) {
       case 'ok': {
         const exclusive = sdb.exclusive == null ? null : sdb.exclusive;
+        if (exclusive && exclusive.length === 0) {
+          // Zelfde oordeel als regionPlan: tegenstrijdige data telt niet.
+          return 'SteamDB-data tegenstrijdig — Humble-gegevens gebruikt';
+        }
         if (exclusive && exclusive.length > 0) {
           return `regio via SteamDB: alleen ${exclusive.length} land${exclusive.length === 1 ? '' : 'en'}`;
         }
@@ -1127,6 +1150,8 @@
         return 'niet op SteamDB gevonden — Humble-gegevens gebruikt';
       case 'ambiguous':
         return 'SteamDB: meerdere pakketten mogelijk — Humble-gegevens gebruikt';
+      case 'unparsed':
+        return 'SteamDB-pagina niet herkend — Humble-gegevens gebruikt';
       case 'challenge':
         return 'SteamDB vraagt om een controle — zie de wachtrij';
       case 'nodata':
@@ -1501,6 +1526,7 @@
     SECRETS: 'secrets',
     STEAMDB_CACHE: 'steamdbCache',
     STEAMDB_JOBS: 'steamdbJobs',
+    STEAMDB_RESULTS: 'steamdbResults',
   };
 
   /** Hoe lang SteamDB-pakketdata houdbaar is. Restricties wijzigen zelden. */
@@ -1520,10 +1546,15 @@
 
   const write = (name, value) => GM_setValue(name, JSON.stringify(value));
 
-  /** Een cache-item alleen teruggeven zolang het houdbaar is. */
+  /**
+   * Een cache-item alleen teruggeven zolang het houdbaar is. Alleen een écht
+   * geslaagde lezing is twee weken houdbaar; verouderd gemarkeerde data en
+   * lege pakketlijsten kunnen bijtrekken en gelden maar een dag.
+   */
   const freshSteamdbEntry = (entry) => {
     if (!entry || !entry.fetchedAt) return null;
-    const ttl = entry.status === 'ok' ? STEAMDB_TTL_OK_MS : STEAMDB_TTL_BAD_MS;
+    const solid = entry.status === 'ok' && !entry.stale && !entry.noPackages;
+    const ttl = solid ? STEAMDB_TTL_OK_MS : STEAMDB_TTL_BAD_MS;
     return Date.now() - entry.fetchedAt < ttl ? entry : null;
   };
 
@@ -1680,6 +1711,38 @@
 
     setSteamdbJobs(record) {
       write(KEYS.STEAMDB_JOBS, record ? { ...record, updatedAt: Date.now() } : null);
+    },
+
+    /**
+     * De regio-uitspraken per wachtrij-item, apart van de wachtrij zelf. Het
+     * werktabblad schrijft hier; de wachtrij wordt alleen door de Humble- en
+     * SteamGifts-tabs beschreven. Zouden ze allebei in de wachtrij schrijven,
+     * dan kan het werktabblad een net gezette status (ingevuld/klaar)
+     * terugdraaien — lees-wijzig-schrijf zonder slot.
+     */
+    getSteamdbResult(itemId) {
+      return read(KEYS.STEAMDB_RESULTS, {})[itemId] || null;
+    },
+
+    putSteamdbResult(itemId, result) {
+      const results = read(KEYS.STEAMDB_RESULTS, {});
+      results[itemId] = result;
+      write(KEYS.STEAMDB_RESULTS, results);
+    },
+
+    /** Uitspraken opruimen van items die niet meer in de wachtrij staan. */
+    pruneSteamdbResults(validIds) {
+      const keep = new Set(validIds || []);
+      const results = read(KEYS.STEAMDB_RESULTS, {});
+      const pruned = {};
+      for (const [id, value] of Object.entries(results)) {
+        if (keep.has(id)) pruned[id] = value;
+      }
+      write(KEYS.STEAMDB_RESULTS, pruned);
+    },
+
+    clearSteamdbResults() {
+      write(KEYS.STEAMDB_RESULTS, {});
     },
 
     // --- meeluisteren ---------------------------------------------------------
@@ -1971,8 +2034,16 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
  * onderscheiden van gewoon browsen, en een eventuele Cloudflare-controle kan
  * de gebruiker gewoon zelf oplossen.
  *
- * De uitkomst per spel gaat als `steamdb`-veld het wachtrij-item in; de
- * SteamGifts-kant beslist daarmee via `HSG.regionPlan` over de regio.
+ * De uitkomst per spel gaat naar een eigen opslagsleutel
+ * (`store.putSteamdbResult`), niet de wachtrij in: de wachtrij wordt alleen
+ * door de Humble- en SteamGifts-tabs beschreven, en een tweede schrijver zou
+ * daar zonder slot statussen kunnen terugdraaien. De SteamGifts-kant plakt de
+ * uitspraak er bij het invullen zelf bij en beslist via `HSG.regionPlan`.
+ *
+ * Belangrijkste veiligheidsregel hier: alleen een pagina die zichzelf als
+ * pakketpagina bewijst telt als antwoord. "Geen restrictierijen gevonden" op
+ * een niet-herkende pagina is geen "geen beperking" — juist die uitkomst zou
+ * Humble overschrijven.
  */
 'use strict';
 
@@ -1983,9 +2054,14 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
   const WORKER_MARK = 'hsg-worker';
   /** Na zo lang zonder hartslag geldt een werktabblad als verdwenen. */
   const HEARTBEAT_STALE_MS = 20000;
+  /** De werker klopt elke paar seconden, ook tijdens pauzes en wachttijden. */
+  const HEARTBEAT_EVERY_MS = 5000;
   const WORKER_ID = `w${Math.random().toString(36).slice(2)}`;
 
   const isWorkerTab = () => location.hash.indexOf(WORKER_MARK) !== -1;
+
+  const heartbeatFresh = (record) =>
+    Boolean(record && record.heartbeatAt && Date.now() - record.heartbeatAt < HEARTBEAT_STALE_MS);
 
   // --- pagina's lezen ---------------------------------------------------------
 
@@ -2023,9 +2099,13 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
 
   function parseSubDocument(doc) {
     const bodyText = doc.body ? doc.body.textContent : '';
+    const fields = HSG.steamdbFieldsFromRows(rowPairs(doc));
     return {
+      // Restrictierijen gevonden is bewijs genoeg; zonder restricties moet de
+      // pagina zich met een van de vaste pakketteksten bewijzen.
+      proof: Object.keys(fields).length > 0 || SD.subPageProof.test(bodyText),
       stale: SD.stalePattern.test(bodyText),
-      restrictions: HSG.steamdbRestrictions(HSG.steamdbFieldsFromRows(rowPairs(doc))),
+      restrictions: HSG.steamdbRestrictions(fields),
       name: pageName(doc),
     };
   }
@@ -2073,7 +2153,12 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     }
 
     const bodyText = doc.body ? doc.body.textContent : '';
-    return { candidates, noPackages: SD.noPackagesPattern.test(bodyText) };
+    const noPackages = SD.noPackagesPattern.test(bodyText);
+    return {
+      proof: candidates.length > 0 || noPackages || SD.appSubsProof.test(bodyText),
+      candidates,
+      noPackages,
+    };
   }
 
   const isChallengeDocument = (doc) =>
@@ -2082,11 +2167,19 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
 
   // --- ophalen ----------------------------------------------------------------
 
-  /** Ging er in de huidige taak iets over het netwerk? Dan pauzeren we erna. */
-  let touchedNetwork = false;
+  /**
+   * Alle netwerkverkeer loopt hierlangs, en dit is ook de plek die het tempo
+   * bewaakt: minimaal 2-5 s (met jitter) tussen twee fetches, wat de aanroeper
+   * ook doet. SteamDB verbiedt agressief scrapen; wij gedragen ons als een
+   * rustige bezoeker.
+   */
+  let lastFetchAt = 0;
 
   async function fetchDoc(path) {
-    touchedNetwork = true;
+    const wait = lastFetchAt + 2000 + Math.random() * 3000 - Date.now();
+    if (wait > 0) await HSG.sleep(wait);
+    lastFetchAt = Date.now();
+
     const response = await fetch(path, {
       credentials: 'include',
       headers: { Accept: 'text/html' },
@@ -2094,7 +2187,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
 
     if (response.status === 429) {
       const retry = Number(response.headers.get('Retry-After')) || 30;
-      const error = new Error(`SteamDB vraagt om rust (429).`);
+      const error = new Error('SteamDB vraagt om rust (429).');
       error.kind = 'ratelimit';
       error.retryAfter = Math.min(retry, 120);
       throw error;
@@ -2116,7 +2209,15 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
           : 'http';
       throw error;
     }
-    return new DOMParser().parseFromString(text, 'text/html');
+
+    const doc = new DOMParser().parseFromString(text, 'text/html');
+    // Ook een 200 kan een tussenpagina zijn; die mag nooit als inhoud tellen.
+    if (isChallengeDocument(doc)) {
+      const error = new Error('SteamDB toont een controlepagina.');
+      error.kind = 'challenge';
+      throw error;
+    }
+    return doc;
   }
 
   /** De eigen pagina van het werktabblad hoeft niet nóg een keer opgehaald. */
@@ -2131,7 +2232,12 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     try {
       const path = `/sub/${subId}/`;
       const doc = onOwnPage(path) ? document : await fetchDoc(path);
-      entry = { status: 'ok', ...parseSubDocument(doc) };
+      const parsed = parseSubDocument(doc);
+      // Zonder bewijs van een pakketpagina is "geen restricties" geen
+      // uitkomst maar een leesfout — kort cachen en terugvallen op Humble.
+      entry = parsed.proof
+        ? { status: 'ok', stale: parsed.stale, restrictions: parsed.restrictions, name: parsed.name }
+        : { status: 'unparsed' };
     } catch (error) {
       if (error.kind !== 'notfound') throw error; // challenge/ratelimit/http bubbelt op
       entry = { status: 'notfound' };
@@ -2148,7 +2254,10 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     try {
       const path = `/app/${appId}/subs/`;
       const doc = onOwnPage(path) ? document : await fetchDoc(path);
-      entry = { status: 'ok', ...parseAppSubsDocument(doc) };
+      const parsed = parseAppSubsDocument(doc);
+      entry = parsed.proof
+        ? { status: 'ok', candidates: parsed.candidates, noPackages: parsed.noPackages }
+        : { status: 'unparsed' };
     } catch (error) {
       if (error.kind !== 'notfound') throw error;
       entry = { status: 'notfound' };
@@ -2156,8 +2265,6 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     HSG.store.putSteamdbApp(appId, entry);
     return entry;
   }
-
-  const pause = () => HSG.sleep(2000 + Math.random() * 3000);
 
   /**
    * Eén spel: van pakket-id (of app-id) naar een regio-uitspraak.
@@ -2174,43 +2281,39 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
         );
         return { ...resolved, subName: entry.name || null };
       }
-      // Het directe pakket bestaat niet (meer): door naar de pakketlijst.
+      if (entry.status === 'unparsed' && !job.appId) return { status: 'unparsed', subIds: [] };
+      // Het directe pakket bestaat niet (meer) of was onleesbaar:
+      // door naar de pakketlijst van de app.
     }
 
     if (!job.appId) return { status: job.subId ? 'nosub' : 'nodata', subIds: [] };
 
     const appEntry = await lookupApp(job.appId);
+    if (appEntry.status === 'unparsed') return { status: 'unparsed', subIds: [] };
     if (appEntry.status !== 'ok' || appEntry.noPackages || (appEntry.candidates || []).length === 0) {
       return { status: 'nosub', subIds: [] };
     }
 
     const pick = HSG.pickSteamdbSubs(appEntry.candidates);
     if (pick.reason === 'none') return { status: 'nosub', subIds: [] };
-    if (pick.reason === 'unrestricted') {
-      return { status: 'ok', disallowed: [], exclusive: null, subIds: [] };
-    }
+    if (pick.reason === 'many') return { status: 'ambiguous', subIds: [] };
 
     const fetched = [];
     for (const subId of pick.subIds) {
-      touchedNetwork = false;
       const entry = await lookupSub(subId);
       if (entry.status === 'ok') {
         fetched.push({ subId: String(subId), stale: entry.stale, restrictions: entry.restrictions });
       }
-      if (touchedNetwork) await pause();
     }
-    return HSG.resolveSteamdbCandidates(fetched, pick.reason);
+    return HSG.resolveSteamdbCandidates(fetched, pick.reason, pick.subIds.length);
   }
 
-  function applyToQueue(itemId, result) {
-    HSG.store.withQueue((queue) =>
-      HSG.updateItem(queue, itemId, { steamdb: { ...result, checkedAt: Date.now() } })
-    );
+  /** De uitspraak opslaan — in de eigen resultatenmap, niet in de wachtrij. */
+  function applyResult(itemId, result) {
+    HSG.store.putSteamdbResult(itemId, { ...result, checkedAt: Date.now() });
   }
 
   // --- de takenlijst (cachebeslissingen zonder netwerk) -----------------------
-
-  const stamp = (result) => ({ ...result });
 
   /** Zelfde beslissing als `lookupJob`, maar uitsluitend uit de cache. */
   function resolveFromCache(subId, appId) {
@@ -2218,28 +2321,28 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       const entry = HSG.store.readSteamdbSub(subId);
       if (!entry) return null;
       if (entry.status === 'ok') {
-        return stamp({
+        return {
           ...HSG.resolveSteamdbCandidates(
             [{ subId: String(subId), stale: entry.stale, restrictions: entry.restrictions }],
             'direct'
           ),
           subName: entry.name || null,
-        });
+        };
       }
-      // notfound in cache → beslis via de pakketlijst van de app, indien bekend.
+      if (entry.status === 'unparsed' && !appId) return { status: 'unparsed', subIds: [] };
+      // notfound/onleesbaar in cache → beslis via de pakketlijst, indien bekend.
     }
-    if (!appId) return subId ? stamp({ status: 'nosub', subIds: [] }) : null;
+    if (!appId) return subId ? { status: 'nosub', subIds: [] } : null;
 
     const appEntry = HSG.store.readSteamdbApp(appId);
     if (!appEntry) return null;
+    if (appEntry.status === 'unparsed') return { status: 'unparsed', subIds: [] };
     if (appEntry.status !== 'ok' || appEntry.noPackages || !(appEntry.candidates || []).length) {
-      return stamp({ status: 'nosub', subIds: [] });
+      return { status: 'nosub', subIds: [] };
     }
     const pick = HSG.pickSteamdbSubs(appEntry.candidates);
-    if (pick.reason === 'none') return stamp({ status: 'nosub', subIds: [] });
-    if (pick.reason === 'unrestricted') {
-      return stamp({ status: 'ok', disallowed: [], exclusive: null, subIds: [] });
-    }
+    if (pick.reason === 'none') return { status: 'nosub', subIds: [] };
+    if (pick.reason === 'many') return { status: 'ambiguous', subIds: [] };
     const fetched = [];
     for (const id of pick.subIds) {
       const entry = HSG.store.readSteamdbSub(id);
@@ -2248,7 +2351,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
         fetched.push({ subId: String(id), stale: entry.stale, restrictions: entry.restrictions });
       }
     }
-    return stamp(HSG.resolveSteamdbCandidates(fetched, pick.reason));
+    return HSG.resolveSteamdbCandidates(fetched, pick.reason, pick.subIds.length);
   }
 
   let workerHandle = null;
@@ -2273,11 +2376,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
   }
 
   function openWorkerIfNeeded(record) {
-    const active =
-      record.status === 'running' &&
-      record.heartbeatAt &&
-      Date.now() - record.heartbeatAt < HEARTBEAT_STALE_MS;
-    if (active) return;
+    if (record.status === 'running' && heartbeatFresh(record)) return;
     if (workerHandle && !workerHandle.closed) return;
 
     const first = (record.jobs || []).find((job) => !job.done);
@@ -2309,6 +2408,12 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     const settings = HSG.store.getSettings();
     if (settings.steamdbRegion === false) return { queued: 0 };
 
+    // Uitspraken van verdwenen wachtrij-items opruimen, nu we hier toch zijn.
+    const queueIds = HSG.store.getQueue().items.map((item) => item.id);
+    HSG.store.pruneSteamdbResults(
+      queueIds.concat((entries || []).map((entry) => HSG.itemId(entry.gamekey, entry.machineName)))
+    );
+
     const jobs = [];
     for (const entry of entries || []) {
       const itemId = HSG.itemId(entry.gamekey, entry.machineName);
@@ -2316,15 +2421,15 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       const appId = entry.steamAppId || null;
 
       if (!subId && !appId) {
-        applyToQueue(itemId, { status: 'nodata', subIds: [] });
+        applyResult(itemId, { status: 'nodata', subIds: [] });
         continue;
       }
       const cached = resolveFromCache(subId, appId);
       if (cached) {
-        applyToQueue(itemId, cached);
+        applyResult(itemId, cached);
         continue;
       }
-      applyToQueue(itemId, { status: 'pending', subIds: [] });
+      applyResult(itemId, { status: 'pending', subIds: [] });
       jobs.push({ itemId, subId, appId, name: entry.humanName || null, done: false });
     }
     if (jobs.length === 0) return { queued: 0 };
@@ -2336,38 +2441,55 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
             (job) => !job.done && !jobs.some((fresh) => fresh.itemId === job.itemId)
           )
         : [];
-    const running =
-      existing &&
-      existing.status === 'running' &&
-      existing.heartbeatAt &&
-      Date.now() - existing.heartbeatAt < HEARTBEAT_STALE_MS;
+    const running = existing && existing.status === 'running' && heartbeatFresh(existing);
+    // Een openstaande Cloudflare-controle blijft staan: een nieuw tabblad zou
+    // op dezelfde muur stuiten, en het paneel toont al een herstelknop.
+    const status = running
+      ? 'running'
+      : existing && existing.status === 'challenge'
+        ? 'challenge'
+        : 'pending';
 
     const record = {
       jobs: keep.concat(jobs),
-      status: running ? 'running' : 'pending',
+      status,
       workerId: running ? existing.workerId : null,
       heartbeatAt: running ? existing.heartbeatAt : 0,
       startedAt: Date.now(),
     };
     HSG.store.setSteamdbJobs(record);
-    openWorkerIfNeeded(record);
+    if (status !== 'challenge') openWorkerIfNeeded(record);
     return { queued: jobs.length };
   }
 
-  /** Voor het paneel: loopt er nog iets, en zit het vast op een controle? */
+  /** Voor het paneel: loopt er nog iets, zit het vast, of ligt het stil? */
   function jobsSummary() {
     const record = HSG.store.getSteamdbJobs();
     if (!record || !Array.isArray(record.jobs)) return null;
     const open = record.jobs.filter((job) => !job.done).length;
     if (open === 0) return null;
-    return { open, total: record.jobs.length, status: record.status };
+    const stalled =
+      record.status !== 'challenge' &&
+      !heartbeatFresh(record) &&
+      Date.now() - (record.startedAt || 0) > 30000;
+    return { open, total: record.jobs.length, status: record.status, stalled };
   }
 
-  /** Na een opgeloste Cloudflare-controle: opnieuw een werktabblad openen. */
+  /** Herstelknop: vastgelopen of geblokkeerde controles opnieuw aanzwengelen. */
   function retryLookups() {
     const record = HSG.store.getSteamdbJobs();
     if (!record || !(record.jobs || []).some((job) => !job.done)) return false;
-    const next = { ...record, status: 'pending', heartbeatAt: 0 };
+    // Een hangend werktabblad eerst sluiten, anders houdt de open-check het
+    // nieuwe tabblad tegen en gebeurt er stilletjes niets.
+    if (workerHandle && !workerHandle.closed) {
+      try {
+        workerHandle.close();
+      } catch (error) {
+        // Prima, dan blijft het staan.
+      }
+      workerHandle = null;
+    }
+    const next = { ...record, status: 'pending', workerId: null, heartbeatAt: 0, startedAt: Date.now() };
     HSG.store.setSteamdbJobs(next);
     openWorkerIfNeeded(next);
     return true;
@@ -2414,16 +2536,12 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
   async function runJobs() {
     let record = HSG.store.getSteamdbJobs();
     if (!record || !Array.isArray(record.jobs) || !record.jobs.some((job) => !job.done)) {
-      overlay('niets meer te doen — dit tabblad mag dicht.');
+      if (isWorkerTab()) overlay('niets meer te doen — dit tabblad mag dicht.');
       return;
     }
     // Niet met z'n tweeën aan dezelfde lijst werken.
     const otherActive =
-      record.status === 'running' &&
-      record.workerId &&
-      record.workerId !== WORKER_ID &&
-      record.heartbeatAt &&
-      Date.now() - record.heartbeatAt < HEARTBEAT_STALE_MS;
+      record.status === 'running' && record.workerId !== WORKER_ID && heartbeatFresh(record);
     if (otherActive) return;
 
     HSG.store.setSteamdbJobs({
@@ -2433,61 +2551,89 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       heartbeatAt: Date.now(),
     });
 
-    const total = record.jobs.length;
+    // De hartslag loopt óók tijdens fetch-pauzes en 429-wachttijden; een taak
+    // kan zo langer duren dan het verversvenster, en zonder slag zou een
+    // tweede tabblad denken dat wij verdwenen zijn en ernaast gaan draaien.
+    const beat = setInterval(() => {
+      const current = HSG.store.getSteamdbJobs();
+      if (current) HSG.store.setSteamdbJobs({ ...current, heartbeatAt: Date.now() });
+    }, HEARTBEAT_EVERY_MS);
+
     let waits = 0;
+    try {
+      for (;;) {
+        record = HSG.store.getSteamdbJobs();
+        const openJobs = (record && record.jobs) || [];
+        const job = openJobs.find((entry) => !entry.done);
 
-    for (;;) {
-      record = HSG.store.getSteamdbJobs();
-      const openJobs = (record && record.jobs) || [];
-      const job = openJobs.find((entry) => !entry.done);
-      if (!job) break;
-
-      const done = openJobs.filter((entry) => entry.done).length;
-      overlay(
-        `pakketdata lezen — ${job.name || job.subId || job.appId} (${done + 1} van ${Math.max(total, openJobs.length)})…`
-      );
-      HSG.store.setSteamdbJobs({ ...record, heartbeatAt: Date.now() });
-
-      touchedNetwork = false;
-      let result;
-      try {
-        result = await lookupJob(job);
-        waits = 0;
-      } catch (error) {
-        if (error.kind === 'ratelimit' && waits < 2) {
-          waits += 1;
-          overlay(`SteamDB vraagt om rust — ${error.retryAfter}s wachten…`);
-          await HSG.sleep(error.retryAfter * 1000);
-          continue; // zelfde taak opnieuw
+        if (!job) {
+          HSG.store.setSteamdbJobs({ ...(record || { jobs: [] }), status: 'done' });
+          // Kwam er tijdens het afronden nét een taak bij, pak die dan alsnog
+          // op in plaats van hem als wees achter te laten.
+          const recheck = HSG.store.getSteamdbJobs();
+          if (recheck && (recheck.jobs || []).some((entry) => !entry.done)) {
+            HSG.store.setSteamdbJobs({
+              ...recheck,
+              status: 'running',
+              workerId: WORKER_ID,
+              heartbeatAt: Date.now(),
+            });
+            continue;
+          }
+          break;
         }
-        if (error.kind === 'challenge') {
-          HSG.store.setSteamdbJobs({ ...HSG.store.getSteamdbJobs(), status: 'challenge' });
-          overlay(
-            'SteamDB vraagt om een controle. Ververs deze pagina en los de check op — daarna gaat het vanzelf verder.',
-            { label: 'Opnieuw proberen', onClick: () => location.reload() }
-          );
-          return; // tabblad open laten, anders valt er niets op te lossen
+
+        const done = openJobs.filter((entry) => entry.done).length;
+        overlay(
+          `pakketdata lezen — ${job.name || job.subId || job.appId} (${done + 1} van ${openJobs.length})…`
+        );
+
+        let result;
+        try {
+          result = await lookupJob(job);
+          waits = 0;
+        } catch (error) {
+          if (error.kind === 'ratelimit' && waits < 2) {
+            waits += 1;
+            overlay(`SteamDB vraagt om rust — ${error.retryAfter}s wachten…`);
+            await HSG.sleep(error.retryAfter * 1000);
+            continue; // zelfde taak opnieuw
+          }
+          if (error.kind === 'challenge') {
+            HSG.store.setSteamdbJobs({ ...HSG.store.getSteamdbJobs(), status: 'challenge' });
+            overlay(
+              'SteamDB vraagt om een controle. Ververs deze pagina en los de check op — daarna gaat het vanzelf verder.',
+              { label: 'Opnieuw proberen', onClick: () => location.reload() }
+            );
+            return; // tabblad open laten, anders valt er niets op te lossen
+          }
+          result = { status: 'error', subIds: [], error: String(error.message || error) };
+          waits = 0;
         }
-        result = { status: 'error', subIds: [], error: String(error.message || error) };
-        waits = 0;
+
+        applyResult(job.itemId, result);
+        markJobDone(job.itemId);
       }
-
-      applyToQueue(job.itemId, result);
-      markJobDone(job.itemId);
-      if (touchedNetwork) await pause();
+    } finally {
+      clearInterval(beat);
     }
 
-    HSG.store.setSteamdbJobs({ ...HSG.store.getSteamdbJobs(), status: 'done' });
-    overlay('klaar — dit tabblad sluit zichzelf.');
-    // De opener sluit ons via zijn tab-handle; dit is de terugval voor als die
-    // pagina inmiddels dicht is. Vereist `@grant window.close`.
-    setTimeout(() => {
-      try {
-        window.close();
-      } catch (error) {
-        // Laatste tabblad van het venster — dan blijft het gewoon staan.
-      }
-    }, 1500);
+    if (isWorkerTab()) {
+      overlay('klaar — dit tabblad sluit zichzelf.');
+      // De opener sluit ons via zijn tab-handle; dit is de terugval voor als
+      // die pagina inmiddels dicht is. Vereist `@grant window.close`. In een
+      // gewoon browse-tabblad (de "Nu uitvoeren"-knop) blijven we van het
+      // tabblad van de gebruiker af.
+      setTimeout(() => {
+        try {
+          window.close();
+        } catch (error) {
+          // Laatste tabblad van het venster — dan blijft het gewoon staan.
+        }
+      }, 1500);
+    } else {
+      overlay('regiocontroles afgerond.');
+    }
   }
 
   // --- opstarten --------------------------------------------------------------
@@ -2513,11 +2659,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     // aan het hier af te maken — deze pagina is al door de controle heen.
     const record = HSG.store.getSteamdbJobs();
     const waiting = record && (record.jobs || []).some((job) => !job.done);
-    const active =
-      record &&
-      record.status === 'running' &&
-      record.heartbeatAt &&
-      Date.now() - record.heartbeatAt < HEARTBEAT_STALE_MS;
+    const active = record && record.status === 'running' && heartbeatFresh(record);
     if (waiting && !active) {
       const open = record.jobs.filter((job) => !job.done).length;
       overlay(`er staan nog ${open} regiocontrole(s) klaar.`, {
@@ -2756,6 +2898,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     HSG.store.onChange(HSG.store.NAMES.QUEUE, () => render());
     HSG.store.onChange(HSG.store.NAMES.CATALOG, () => render());
     HSG.store.onChange(HSG.store.NAMES.STEAMDB_JOBS, () => render());
+    HSG.store.onChange(HSG.store.NAMES.STEAMDB_RESULTS, () => render());
 
     render();
     return ui;
@@ -2811,7 +2954,9 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
       const bits = [];
       if (item.sgGameName) bits.push(`SteamGifts: ${item.sgGameName}`);
       else if (item.steamAppId) bits.push(`appid ${item.steamAppId}`);
-      const steamdbLabel = HSG.describeSteamdbStatus(item.steamdb);
+      const steamdbLabel = HSG.describeSteamdbStatus(
+        HSG.store.getSteamdbResult(item.id) || item.steamdb
+      );
       if (steamdbLabel) bits.push(steamdbLabel);
       if (item.error) bits.push(item.error);
       if (item.giveawayUrl) bits.push(item.giveawayUrl);
@@ -2868,6 +3013,10 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
     }
     node.hidden = false;
     node.textContent = '';
+    const retry = () =>
+      toolButton('Opnieuw proberen', () => {
+        if (!HSG.steamdb.retryLookups()) throw new Error('Geen openstaande controles.');
+      });
     if (jobs.status === 'challenge') {
       node.append(
         el(
@@ -2875,9 +3024,16 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
           null,
           'SteamDB vraagt om een controle voordat de regiocheck verder kan. Los die op in het SteamDB-tabblad (of open steamdb.info) en probeer opnieuw. '
         ),
-        toolButton('Opnieuw proberen', () => {
-          if (!HSG.steamdb.retryLookups()) throw new Error('Geen openstaande controles.');
-        })
+        retry()
+      );
+    } else if (jobs.stalled) {
+      node.append(
+        el(
+          'span',
+          null,
+          `De SteamDB-regiocontrole ligt stil (${jobs.open} spel${jobs.open === 1 ? '' : 'len'} open) — het werktabblad is waarschijnlijk gesloten. `
+        ),
+        retry()
       );
     } else {
       node.append(
@@ -3154,6 +3310,7 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
         return;
       }
       HSG.store.clearSteamdbCache();
+      HSG.store.clearSteamdbResults();
       HSG.store.setSteamdbJobs(null);
       notice('SteamDB-cache gewist.', 'ok');
     },
@@ -4178,20 +4335,34 @@ h2 { margin: 14px 0 4px; font-size: 13px; }
    * De SteamDB-regiocontrole draait in een ander tabblad en kan nog bezig zijn
    * als dit formulier al opent. Even wachten is beter dan invullen met data
    * die tien seconden later alsnog binnenkomt.
+   *
+   * De uitspraak staat in een eigen opslagsleutel (het werktabblad schrijft
+   * bewust niet in de wachtrij); hier plakken we hem op het item zodat
+   * `HSG.regionPlan` er niets van hoeft te weten.
    */
   async function waitForSteamdb(item, settings) {
     if (settings.steamdbRegion === false) return item;
-    let current = item;
+
+    const openJob = () => {
+      const record = HSG.store.getSteamdbJobs();
+      if (!record) return false;
+      // Wacht niet op een controle die pas verder kan als de gebruiker een
+      // Cloudflare-check oplost — dan is Humble-data nú het beste antwoord.
+      if (record.status === 'challenge') return false;
+      return (record.jobs || []).some((job) => job.itemId === item.id && !job.done);
+    };
+
+    let result = HSG.store.getSteamdbResult(item.id);
     for (let round = 0; round < 10; round += 1) {
-      if (!current.steamdb || current.steamdb.status !== 'pending') break;
+      const pending = result ? result.status === 'pending' && openJob() : openJob();
+      if (!pending) break;
       if (round === 0) {
         HSG.panel.notice(`${item.humanName} — wachten op de SteamDB-regiocontrole…`, 'ok');
       }
       await HSG.sleep(2000);
-      const queue = HSG.store.getQueue();
-      current = queue.items.find((entry) => entry.id === item.id) || current;
+      result = HSG.store.getSteamdbResult(item.id);
     }
-    return current;
+    return result ? { ...item, steamdb: result } : item;
   }
 
   async function fillForm(item, key, settings, resolved) {

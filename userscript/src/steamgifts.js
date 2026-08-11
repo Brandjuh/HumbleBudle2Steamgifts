@@ -224,20 +224,34 @@
    * De SteamDB-regiocontrole draait in een ander tabblad en kan nog bezig zijn
    * als dit formulier al opent. Even wachten is beter dan invullen met data
    * die tien seconden later alsnog binnenkomt.
+   *
+   * De uitspraak staat in een eigen opslagsleutel (het werktabblad schrijft
+   * bewust niet in de wachtrij); hier plakken we hem op het item zodat
+   * `HSG.regionPlan` er niets van hoeft te weten.
    */
   async function waitForSteamdb(item, settings) {
     if (settings.steamdbRegion === false) return item;
-    let current = item;
+
+    const openJob = () => {
+      const record = HSG.store.getSteamdbJobs();
+      if (!record) return false;
+      // Wacht niet op een controle die pas verder kan als de gebruiker een
+      // Cloudflare-check oplost — dan is Humble-data nú het beste antwoord.
+      if (record.status === 'challenge') return false;
+      return (record.jobs || []).some((job) => job.itemId === item.id && !job.done);
+    };
+
+    let result = HSG.store.getSteamdbResult(item.id);
     for (let round = 0; round < 10; round += 1) {
-      if (!current.steamdb || current.steamdb.status !== 'pending') break;
+      const pending = result ? result.status === 'pending' && openJob() : openJob();
+      if (!pending) break;
       if (round === 0) {
         HSG.panel.notice(`${item.humanName} — wachten op de SteamDB-regiocontrole…`, 'ok');
       }
       await HSG.sleep(2000);
-      const queue = HSG.store.getQueue();
-      current = queue.items.find((entry) => entry.id === item.id) || current;
+      result = HSG.store.getSteamdbResult(item.id);
     }
-    return current;
+    return result ? { ...item, steamdb: result } : item;
   }
 
   async function fillForm(item, key, settings, resolved) {
